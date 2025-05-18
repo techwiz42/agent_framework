@@ -130,25 +130,25 @@ __all__ = ["healthcare_agent", "HealthcareAgent"]
 
 ### 2. Register the New Agent
 
-Update `backend/app/services/agents/__init__.py` to register your new agent:
+The system will automatically detect and register your new agent. Simply create a file with your agent class and instance in the `backend/app/services/agents/` directory following the pattern in step 1.
+
+The framework dynamically discovers new agent modules at runtime. Make sure your agent module includes:
+
+1. A class that extends `BaseAgent` with a descriptive name
+2. An instance of the agent created at the module level
+3. An `__all__` list that includes the agent instance and class names
+
+For example:
 
 ```python
-# Import and register the new agent
-from app.services.agents.healthcare_agent import healthcare_agent, HealthcareAgent
+# Create the agent instance
+healthcare_agent = HealthcareAgent()
 
-# Register with moderator
-moderator_agent.register_agent(healthcare_agent)
-
-# Register with agent interface
-agent_interface.register_base_agent("HEALTHCARE", healthcare_agent)
-
-# Update exports
-__all__ = [
-    # ... existing exports
-    "healthcare_agent",
-    "HealthcareAgent"
-]
+# Expose the agent for importing by other modules
+__all__ = ["healthcare_agent", "HealthcareAgent"]
 ```
+
+No explicit registration in the `__init__.py` file is needed as the framework will automatically find and register your agent.
 
 ### 3. Configure Agent Instructions
 
@@ -303,34 +303,18 @@ async def analyze_medical_condition(condition: str, symptoms: Optional[str] = No
 
 ## Updating the Frontend
 
-To make your new agent available in the frontend:
+The frontend will automatically detect new agents based on the API responses, so manual updates to the frontend code are not needed. When you create a new agent:
 
-### 1. Update Agent Types
+1. The backend API endpoints `/api/agents/available` and `/api/agents/descriptions` will automatically include your new agent
+2. The frontend will dynamically display the new agent in the agent selection UI
+3. The agent's description (set via `self.description` in your agent class) will be used for display purposes
 
-Add your agent to the agent types in `frontend/src/types/index.ts`:
+No changes are required to:
+- Agent type enums
+- Agent description mappings
+- Frontend component configurations
 
-```typescript
-export enum AgentType {
-  MODERATOR = 'MODERATOR',
-  BUSINESS = 'BUSINESS',
-  BUSINESSINTELLIGENCE = 'BUSINESSINTELLIGENCE',
-  DATAANALYSIS = 'DATAANALYSIS',
-  WEBSEARCH = 'WEBSEARCH',
-  DOCUMENTSEARCH = 'DOCUMENTSEARCH',
-  MONITOR = 'MONITOR',
-  HEALTHCARE = 'HEALTHCARE',  // Add your new agent
-}
-```
-
-### 2. Add Agent Description
-
-Update agent descriptions in `frontend/src/components/conversation/AgentList.tsx` or wherever agent descriptions are managed:
-
-```typescript
-const agentDescriptions: Record<AgentType, string> = {
-  // ... existing descriptions
-  [AgentType.HEALTHCARE]: "Provides healthcare information, medical condition analysis, and treatment suggestions",
-};
+This dynamic approach ensures that adding new agents is a backend-only operation with no frontend code changes required.
 ```
 
 ### 3. Create Agent-Specific UI Components (Optional)
