@@ -65,20 +65,26 @@ export default function ConversationPage({ params }: { params: { id: string } })
           if (prev.some(msg => msg.id === lastMessage.id)) {
             return prev;
           }
-          return [...prev, {
-            id: lastMessage.id,
-            content: lastMessage.content,
-            created_at: new Date(lastMessage.timestamp).toISOString(),
+          
+          // Ensure all required fields have non-undefined values
+          const newMessage: Message = {
+            id: lastMessage.id || `msg-${Date.now()}`, // Fallback ID if undefined
+            content: lastMessage.content || '',
+            created_at: lastMessage.timestamp 
+              ? new Date(lastMessage.timestamp).toISOString() 
+              : new Date().toISOString(),
             participant_id: lastMessage.identifier,
             agent_id: lastMessage.agent_type ? lastMessage.identifier : undefined,
             message_info: {
-              participant_name: lastMessage.agent_type || lastMessage.name,
+              participant_name: lastMessage.agent_type || 'User',
               participant_email: lastMessage.email,
               is_owner: lastMessage.is_owner,
               source: lastMessage.agent_type || 'user',
               ...(lastMessage.message_metadata || {})
             }
-          }];
+          };
+          
+          return [...prev, newMessage];
         });
         clearStreamingTokens();
       } else if (lastMessage.type === 'typing_status') {
@@ -153,11 +159,11 @@ export default function ConversationPage({ params }: { params: { id: string } })
 
           // Fetch conversation details
           const conversationData = await getConversation(id);
-          setConversation(conversationData);
+          setConversation(conversationData as Conversation);
 
           // Fetch messages
           const messagesData = await getConversationMessages(id);
-          setMessages(messagesData || []);
+          setMessages(messagesData as Message[] || []);
 
           // Connect to WebSocket
           connect(id);

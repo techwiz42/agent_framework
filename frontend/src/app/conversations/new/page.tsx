@@ -87,14 +87,14 @@ export default function NewConversationPage() {
     setError('');
     
     try {
-      const data = await createConversation({
+      const conversation = await createConversation({
         title: title.trim(),
         description: description.trim() || undefined,
         participants,
         agent_types: [...selectedAgents]
       });
       
-      router.push(`/conversations/${data.id}`);
+      router.push(`/conversations/${conversation.id}`);
     } catch (err) {
       console.error('Failed to create conversation:', err);
       setError('Failed to create conversation. Please try again.');

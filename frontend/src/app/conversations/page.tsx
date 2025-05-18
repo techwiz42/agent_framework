@@ -44,8 +44,14 @@ export default function ConversationsPage() {
       const fetchConversations = async () => {
         try {
           setIsLoadingConversations(true);
-          const data = await getConversations();
-          setConversations(data.conversations || []);
+          const { conversations: fetchedConversations } = await getConversations();
+          // Ensure fetched conversations match the required interface with participants and agents
+          const typedConversations = (fetchedConversations || []).map(conv => ({
+            ...conv,
+            participants: conv.participants || [],
+            agents: conv.agents || []
+          }));
+          setConversations(typedConversations);
         } catch (error) {
           console.error('Failed to fetch conversations:', error);
         } finally {

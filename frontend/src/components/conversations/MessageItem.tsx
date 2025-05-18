@@ -48,7 +48,7 @@ const MessageItem: React.FC<MessageProps> = ({ message, isCurrentUser }) => {
             </div>
             <SyntaxHighlighter
               language={fileData.fileType || 'text'}
-              style={atomDark}
+              style={atomDark as any}
               showLineNumbers
               customStyle={{ margin: 0, borderRadius: 0 }}
             >
@@ -72,12 +72,12 @@ const MessageItem: React.FC<MessageProps> = ({ message, isCurrentUser }) => {
           {textPart && (
             <ReactMarkdown
               components={{
-                code({ node, inline, className, children, ...props }) {
+                code({ node, inline, className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
                   return !inline && match ? (
                     <SyntaxHighlighter
                       language={match[1]}
-                      style={atomDark}
+                      style={atomDark as any}
                       PreTag="div"
                       {...props}
                     >
@@ -101,12 +101,12 @@ const MessageItem: React.FC<MessageProps> = ({ message, isCurrentUser }) => {
       return (
         <ReactMarkdown
           components={{
-            code({ node, inline, className, children, ...props }) {
+            code({ node, inline, className, children, ...props }: any) {
               const match = /language-(\w+)/.exec(className || '');
               return !inline && match ? (
                 <SyntaxHighlighter
                   language={match[1]}
-                  style={atomDark}
+                  style={atomDark as any}
                   PreTag="div"
                   {...props}
                 >

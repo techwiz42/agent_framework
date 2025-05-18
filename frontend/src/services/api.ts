@@ -99,8 +99,12 @@ export const uploadFile = async<T>(url: string, file: File, additionalData?: Rec
 // Conversation-specific API calls
 
 // Get all conversations for the current user
-export const getConversations = async () => {
-  return get('/conversations');
+export interface ConversationsResponse {
+  conversations: Conversation[];
+}
+
+export const getConversations = async (): Promise<ConversationsResponse> => {
+  return get<ConversationsResponse>('/conversations');
 };
 
 // Get a specific conversation by ID
@@ -121,8 +125,19 @@ export interface ConversationCreateParams {
   agent_types?: string[];
 }
 
-export const createConversation = async (params: ConversationCreateParams) => {
-  return post('/conversations', params);
+export interface Conversation {
+  id: string;
+  title: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
+  is_active: boolean;
+  creator_id: string;
+  [key: string]: any; // Allow for additional properties
+}
+
+export const createConversation = async (params: ConversationCreateParams): Promise<Conversation> => {
+  return post<Conversation>('/conversations', params);
 };
 
 // Delete a conversation
@@ -137,7 +152,9 @@ export const addParticipant = async (conversationId: string, email: string, name
 
 // Remove a participant from a conversation
 export const removeParticipant = async (conversationId: string, email: string) => {
-  return del(`/conversations/${conversationId}/remove-participant`, { email });
+  // DELETE request with body is not standard, so we need to use post with a delete method
+  // or adjust the implementation based on the API's requirements
+  return post(`/conversations/${conversationId}/remove-participant`, { email });
 };
 
 // Send invitations to all participants in a conversation
