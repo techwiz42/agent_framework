@@ -1,11 +1,11 @@
 'use client'
 import React from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/context/AuthContext';
-import { Button } from '@/components/ui/button';
+import { useAuth } from '../context/AuthContext';
+import { Button } from '../components/ui/button';
 import { Users, Bot, MessageCircle, Search, FileText, BarChart3 } from 'lucide-react';
 import Link from 'next/link';
-import Logo from '@/components/ui/logo/Logo';
+import Logo from '../components/ui/logo/Logo';
 
 export default function LandingPage() {
   const router = useRouter();

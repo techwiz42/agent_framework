@@ -95,3 +95,57 @@ export const uploadFile = async<T>(url: string, file: File, additionalData?: Rec
   
   return response.data;
 };
+
+// Conversation-specific API calls
+
+// Get all conversations for the current user
+export const getConversations = async () => {
+  return get('/conversations');
+};
+
+// Get a specific conversation by ID
+export const getConversation = async (id: string) => {
+  return get(`/conversations/${id}`);
+};
+
+// Get all messages for a conversation
+export const getConversationMessages = async (id: string) => {
+  return get(`/conversations/${id}/messages`);
+};
+
+// Create a new conversation
+export interface ConversationCreateParams {
+  title: string;
+  description?: string;
+  participants?: { email: string; name?: string }[];
+  agent_types?: string[];
+}
+
+export const createConversation = async (params: ConversationCreateParams) => {
+  return post('/conversations', params);
+};
+
+// Delete a conversation
+export const deleteConversation = async (id: string) => {
+  return del(`/conversations/${id}`);
+};
+
+// Add a participant to a conversation
+export const addParticipant = async (conversationId: string, email: string, name?: string) => {
+  return post(`/conversations/${conversationId}/add-participant`, { email, name });
+};
+
+// Remove a participant from a conversation
+export const removeParticipant = async (conversationId: string, email: string) => {
+  return del(`/conversations/${conversationId}/remove-participant`, { email });
+};
+
+// Send invitations to all participants in a conversation
+export const sendInvitations = async (conversationId: string) => {
+  return post(`/conversations/${conversationId}/send-invitations`);
+};
+
+// Join a conversation using an invitation token
+export const joinConversation = async (token: string, name?: string) => {
+  return post('/conversations/join', { invitation_token: token, name });
+};

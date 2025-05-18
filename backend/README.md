@@ -1,6 +1,6 @@
 # Agent Framework Backend
 
-This is the backend application for the Agent Framework, built with FastAPI, SQLAlchemy, and the OpenAI SDK.
+This is the backend application for the Agent Framework, built with FastAPI, SQLAlchemy, and LLM integrations (OpenAI, Anthropic).
 
 ## Getting Started
 
@@ -52,45 +52,49 @@ The API will be available at [http://localhost:8000](http://localhost:8000).
 ```
 app/
 ├── api/                # API endpoints and routes
-│   ├── endpoints/      # API endpoint handlers
-│   │   ├── auth.py     # Authentication endpoints
-│   │   ├── agents.py   # Agent-related endpoints
-│   │   └── ...         # Other endpoint modules
+│   ├── auth.py         # Authentication endpoints
+│   ├── conversations.py # Conversation management
+│   ├── websockets.py   # WebSocket endpoints
 │   └── routes.py       # API route definitions
 ├── core/               # Core configuration and utilities
+│   ├── buffer_manager.py # Conversation buffer management
 │   ├── config.py       # Application configuration
+│   ├── input_sanitizer.py # Security for prompt injection
+│   ├── progress_manager.py # Progress reporting
 │   ├── security.py     # Authentication and security
-│   └── logging.py      # Logging configuration
+│   ├── text_splitter.py # Text processing
+│   └── websocket_queue.py # WebSocket connection management
 ├── db/                 # Database models and connections
-│   ├── session.py      # Database session management
-│   └── base.py         # Base model class
+│   └── session.py      # Database session management
 ├── models/             # SQLAlchemy ORM models
-│   ├── user.py         # User model
-│   ├── conversation.py # Conversation model
-│   └── ...             # Other models
+│   └── domain/         # Domain models
+│       └── models.py   # Database models
 ├── schemas/            # Pydantic schemas for validation
-│   ├── user.py         # User schemas
-│   ├── agent.py        # Agent schemas
-│   └── ...             # Other schemas
+│   └── domain/         # Domain schemas
+│       └── schemas.py  # API schemas
 └── services/           # Business logic services
     ├── agents/         # Agent implementations
-    │   ├── base_agent.py              # Base agent class
-    │   ├── agent_interface.py         # Agent management interface
-    │   ├── common_context.py          # Shared context object
-    │   ├── moderator_agent.py         # Moderator/router agent
-    │   ├── business_agent.py          # Business strategy agent
+    │   ├── agent_interface.py     # Agent registry
+    │   ├── agent_manager.py       # Agent orchestration
+    │   ├── base_agent.py          # Base agent class
+    │   ├── collaboration_manager.py # Multi-agent collaboration
+    │   ├── common_context.py      # Shared context object
+    │   ├── moderator_agent.py     # Moderator/router agent
+    │   ├── business_agent.py      # Business strategy agent
     │   ├── business_intelligence_agent.py  # BI agent
-    │   ├── data_analysis_agent.py     # Data analysis agent
-    │   ├── web_search_agent.py        # Web search agent
-    │   ├── document_search_agent.py   # Document search agent
-    │   └── monitor_agent.py           # System monitoring agent
-    ├── integrations/   # External service integrations
-    │   ├── google_drive_service.py    # Google Drive integration
-    │   └── onedrive_service.py        # OneDrive integration
-    ├── memory/         # Memory and context management
-    │   └── memory_service.py          # Conversation memory service
-    └── rag/            # Retrieval-augmented generation
-        └── rag_service.py             # RAG implementation
+    │   ├── data_analysis_agent.py # Data analysis agent
+    │   ├── web_search_agent.py    # Web search agent
+    │   ├── document_search_agent.py # Document search agent
+    │   └── monitor_agent.py       # System monitoring agent
+    ├── email_service.py        # Email notification service
+    ├── memory/                 # Memory management
+    │   └── conversation_buffer.py # Conversation history
+    ├── notifications.py        # User notifications
+    ├── rag/                    # Retrieval Augmented Generation
+    │   └── storage_service.py  # Document storage and retrieval
+    └── integrations/           # External service integrations
+        ├── google_drive_service.py    # Google Drive integration
+        └── onedrive_service.py        # OneDrive integration
 ```
 
 ## Key Features
@@ -101,24 +105,35 @@ app/
 - Moderator agent for query routing
 - Specialized agents for different domains
 - Agent registry and management
+- Multi-agent collaboration
+
+### Conversation Management
+
+- Thread-based conversation structure
+- Participant management and access control
+- Message history and context tracking
+- Privacy settings for sensitive conversations
 
 ### Authentication
 
 - JWT-based authentication
-- Role-based access control
+- User and participant authentication flows
 - Secure password hashing
+- Email verification
 
 ### Real-time Communication
 
 - WebSocket support for real-time messaging
-- Message streaming for long-running operations
+- Message streaming for immediate feedback
+- Typing indicators and connection management
+- Progress tracking for long-running operations
 
 ### Document Processing
 
 - File upload and processing
-- Google Drive integration
-- OneDrive integration
-- Vector search for document retrieval
+- External storage integrations
+- Vector database for semantic search
+- RAG (Retrieval Augmented Generation)
 
 ## Configuration
 
@@ -137,28 +152,32 @@ ACCESS_TOKEN_EXPIRE_MINUTES=1440
 API_HOST=0.0.0.0
 API_PORT=8000
 FRONTEND_URL=http://localhost:3000
-WS_URL=ws://localhost:8000/ws
-API_URL=http://localhost:8000
+CORS_ORIGINS=http://localhost:3000,http://localhost:8000
+API_V1_STR=/api/v1
 
-# WebSocket
-WS_HEARTBEAT_INTERVAL=30
-WS_CONNECTION_TIMEOUT=3600
-
-# OpenAI
+# LLM
 OPENAI_API_KEY=your-openai-key
+ANTHROPIC_API_KEY=your-anthropic-key
 DEFAULT_AGENT_MODEL=gpt-4o
 
-# Google OAuth
+# Storage
+CHROMA_PERSIST_DIR=./data/chroma
+BUFFER_SAVE_DIR=./data/buffers
+
+# Email (optional)
+SMTP_FROM_EMAIL=noreply@example.com
+SMTP_FROM_NAME=Agent Framework
+GMAIL_APP_PASSWORD=your-gmail-app-password
+
+# Google OAuth (optional)
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 
-# Microsoft OAuth
+# Microsoft OAuth (optional)
 MICROSOFT_CLIENT_ID=your-microsoft-client-id
 MICROSOFT_CLIENT_SECRET=your-microsoft-client-secret
 
-# RAG
-CHROMA_PERSIST_DIR=/path/to/chroma_db
-BUFFER_SAVE_DIR=/path/to/buffers
+# RAG (optional)
 RAG_CHUNK_SIZE=1000
 RAG_CHUNK_OVERLAP=200
 RAG_DEFAULT_RETRIEVAL_K=4
@@ -187,18 +206,7 @@ from app.services.agents.common_context import CommonAgentContext
 
 logger = logging.getLogger(__name__)
 
-# Placeholder for function_tool decorator
-def function_tool(func):
-    return func
-
-class CustomAgentHooks(AgentHooks):
-    """Custom hooks for the custom agent."""
-
-    async def init_context(self, context: RunContextWrapper[Any]) -> None:
-        await super().init_context(context)
-        logger.info(f"Initialized context for CustomAgent")
-
-@function_tool
+# Define domain-specific tools
 async def custom_tool(param1: str, param2: Optional[str] = None) -> str:
     """
     Description of what this tool does.
@@ -213,6 +221,13 @@ async def custom_tool(param1: str, param2: Optional[str] = None) -> str:
     # Tool implementation
     return "{}"
 
+class CustomAgentHooks(AgentHooks):
+    """Custom hooks for the custom agent."""
+
+    async def init_context(self, context: RunContextWrapper[Any]) -> None:
+        await super().init_context(context)
+        logger.info(f"Initialized context for CustomAgent")
+
 class CustomAgent(BaseAgent):
     """
     Description of the custom agent's purpose.
@@ -221,6 +236,7 @@ class CustomAgent(BaseAgent):
     def __init__(self, name="CUSTOM"):
         super().__init__(
             name=name,
+            model=settings.DEFAULT_AGENT_MODEL,
             instructions="""Detailed instructions for the agent...""",
             functions=[custom_tool],
             hooks=CustomAgentHooks()
@@ -255,38 +271,26 @@ __all__ = [
 ]
 ```
 
-### Agent Tools
+For more detailed instructions, refer to the [Domain Extension Guide](/DOMAIN_EXTENSION_GUIDE.md).
 
-Tools are functions that can be called by the agent to perform specific actions. To create a new tool:
+### Agent Interaction via WebSockets
 
-1. Define the tool using the `function_tool` decorator
-2. Implement the tool functionality
-3. Add the tool to the agent's functions list
+Users can interact with agents through WebSocket connections:
 
-Example:
-
-```python
-@function_tool
-async def analyze_data(data: str, analysis_type: Optional[str] = "basic") -> str:
-    """
-    Analyze provided data.
-    
-    Args:
-        data: The data to analyze
-        analysis_type: Type of analysis to perform
-        
-    Returns:
-        JSON string with analysis results
-    """
-    # Tool implementation here
-    return json.dumps({"result": "analysis"})
-
-# Add to agent
-my_agent = MyAgent(
-    name="MY_AGENT",
-    functions=[analyze_data]
-)
 ```
+WebSocket URL: ws://localhost:8000/ws/conversations/{conversation_id}
+```
+
+- Message format:
+  - `@AGENT_NAME message` - Direct message to a specific agent
+  - `@ message` - Let the moderator choose the most appropriate agent
+  - `?` - Show help message
+  - Regular messages without `@` are broadcast to all participants
+
+- Response format:
+  - Messages with agent responses
+  - Typing indicators
+  - Token-by-token streaming for real-time feedback
 
 ## Testing
 
@@ -299,7 +303,7 @@ pytest
 For specific test files:
 
 ```bash
-pytest tests/test_api/test_endpoints/test_auth.py
+pytest tests/test_api/test_auth.py
 ```
 
 With coverage:

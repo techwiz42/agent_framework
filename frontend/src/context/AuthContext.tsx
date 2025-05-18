@@ -15,6 +15,7 @@ export interface User {
 // Define auth context value type
 interface AuthContextValue {
   user: User | null;
+  token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -26,6 +27,7 @@ interface AuthContextValue {
 // Create context with default values
 const AuthContext = createContext<AuthContextValue>({
   user: null,
+  token: null,
   isLoading: true,
   isAuthenticated: false,
   login: async () => {},
@@ -37,22 +39,27 @@ const AuthContext = createContext<AuthContextValue>({
 // Auth provider component
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
 
   // Check for existing user on mount
   useEffect(() => {
     const checkAuth = async () => {
-      const token = localStorage.getItem('auth_token');
+      const storedToken = localStorage.getItem('auth_token');
       
-      if (token) {
+      if (storedToken) {
         try {
+          // Set token state
+          setToken(storedToken);
+          
           // Verify token and get user info
           const response = await api.get('/auth/me');
           setUser(response.data);
         } catch (error) {
           console.error('Error verifying authentication:', error);
           localStorage.removeItem('auth_token');
+          setToken(null);
         }
       }
       
@@ -72,6 +79,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       // Save token and user info
       localStorage.setItem('auth_token', access_token);
+      setToken(access_token);
       setUser(user);
       
       // Redirect to conversations page
@@ -94,6 +102,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       // Save token and user info
       localStorage.setItem('auth_token', access_token);
+      setToken(access_token);
       setUser(user);
       
       // Redirect to conversations page
@@ -109,6 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Logout function
   const logout = () => {
     localStorage.removeItem('auth_token');
+    setToken(null);
     setUser(null);
     router.push('/');
   };
@@ -124,6 +134,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Context value
   const value = {
     user,
+    token,
     isLoading,
     isAuthenticated: !!user,
     login,
