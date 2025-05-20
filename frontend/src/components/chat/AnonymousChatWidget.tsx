@@ -54,117 +54,159 @@ export const AnonymousChatWidget: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // WebSocket connection function 
+  const connectWebSocket = () => {
+    // Close any existing connection first
+    if (wsRef.current) {
+      try {
+        if (wsRef.current.readyState !== WebSocket.CLOSED && wsRef.current.readyState !== WebSocket.CLOSING) {
+          console.log('Closing existing WebSocket connection before creating a new one');
+          wsRef.current.close();
+        }
+      } catch (e) {
+        console.error('Error while closing existing WebSocket:', e);
+      }
+    }
+    
+    // Determine the WebSocket URL - Use the same host as the current page
+    // This requires the Nginx proxy to be configured properly
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/anonymous/${agentType}?session_id=${sessionId}&connection_id=${sessionId}`;
+    
+    console.log('Connecting to WebSocket:', wsUrl);
+    
+    try {
+      const ws = new WebSocket(wsUrl);
+      
+      // Basic WebSocket setup
+      ws.onopen = () => {
+        console.log('WebSocket connection opened successfully');
+        setIsConnected(true);
+        
+        // Only add welcome message if this is the first connection (no messages yet)
+        if (messages.length === 0) {
+          const welcomeMessage = "Hello! I'm here to help with any customer service questions you might have. How can I assist you today?";
+          
+          setMessages([{
+            id: uuidv4(),
+            content: welcomeMessage,
+            sender: 'agent' as const,
+            timestamp: new Date(),
+            agentType: agentType
+          }]);
+        } else {
+          // For reconnections, add a different message
+          setMessages(prev => [...prev, {
+            id: uuidv4(),
+            content: "I'm connected again. How can I help you?",
+            sender: 'agent' as const,
+            timestamp: new Date(),
+            agentType: agentType
+          }]);
+        }
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          console.log('WebSocket message received:', event.data);
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'message') {
+            setMessages(prev => [...prev, {
+              id: data.id || uuidv4(),
+              content: formatAgentResponse(data.content),
+              sender: 'agent' as const,
+              timestamp: new Date(data.timestamp),
+              agentType: data.agent_type || agentType
+            }]);
+            setIsTyping(false);
+          } else if (data.type === 'token') {
+            // Handle streaming tokens
+            setMessages(prev => {
+              const lastMessage = prev[prev.length - 1];
+              
+              if (lastMessage && lastMessage.sender === 'agent' && !lastMessage.id.includes('complete')) {
+                const updatedMessages = [...prev];
+                updatedMessages[updatedMessages.length - 1] = {
+                  ...lastMessage,
+                  content: formatAgentResponse(lastMessage.content + data.token)
+                };
+                return updatedMessages;
+              } else {
+                return [...prev, {
+                  id: `streaming-${uuidv4()}`,
+                  content: data.token,
+                  sender: 'agent' as const,
+                  timestamp: new Date(),
+                  agentType: agentType
+                }];
+              }
+            });
+          } else if (data.type === 'typing_status') {
+            setIsTyping(data.is_typing);
+          }
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setIsConnected(false);
+      };
+      
+      ws.onclose = (event) => {
+        console.log(`WebSocket connection closed: code=${event.code}, reason=${event.reason || 'No reason provided'}`);
+        setIsConnected(false);
+        wsRef.current = null;
+        
+        // Attempt to reconnect after a delay if we're still open
+        if (isOpen) {
+          console.log('Will attempt to reconnect in 3 seconds...');
+          setTimeout(() => {
+            if (isOpen) {
+              console.log('Attempting reconnection...');
+              connectWebSocket();
+            }
+          }, 3000);
+        }
+      };
+      
+      // Store the WebSocket reference
+      wsRef.current = ws;
+    } catch (error) {
+      console.error('Failed to establish WebSocket connection:', error);
+      setIsConnected(false);
+      wsRef.current = null;
+    }
+  };
+
   // Connect to WebSocket
   useEffect(() => {
-    if (isOpen && !wsRef.current) {
+    if (isOpen) {
       // Initialize as connected to enable the input field while we attempt connection
       setIsConnected(true);
       
-      // Determine the WebSocket URL
-      // First try environment variable, fallback to relative URL, then absolute URL
-      let wsUrl;
-      if (process.env.NEXT_PUBLIC_WS_URL) {
-        wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/anonymous/${agentType}?session_id=${sessionId}&connection_id=${sessionId}`;
+      // Only create a new connection if one doesn't already exist
+      if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED || wsRef.current.readyState === WebSocket.CLOSING) {
+        connectWebSocket();
       } else {
-        // Try to construct a relative WebSocket URL based on current location
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host;
-        wsUrl = `${protocol}//${host}/ws/anonymous/${agentType}?session_id=${sessionId}&connection_id=${sessionId}`;
-      }
-      
-      console.log('Connecting to WebSocket:', wsUrl);
-      
-      try {
-        const ws = new WebSocket(wsUrl);
-        
-        ws.onopen = () => {
-          setIsConnected(true);
-          // Add welcome message on connection
-          const welcomeMessage = "Hello! I'm here to help with any customer service questions you might have. How can I assist you today?";
-            
-          setTimeout(() => {
-            setMessages([{
-              id: uuidv4(),
-              content: welcomeMessage,
-              sender: 'agent' as const,
-              timestamp: new Date(),
-              agentType: agentType
-            }]);
-          }, 500);
-        };
-        
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            
-            if (data.type === 'message') {
-              setMessages(prev => [...prev, {
-                id: data.id || uuidv4(),
-                content: formatAgentResponse(data.content),
-                sender: 'agent' as const,
-                timestamp: new Date(data.timestamp),
-                agentType: data.agent_type || agentType
-              }]);
-              setIsTyping(false);
-            } else if (data.type === 'token') {
-              // Handle streaming tokens
-              setMessages(prev => {
-                const lastMessage = prev[prev.length - 1];
-                
-                if (lastMessage && lastMessage.sender === 'agent' && !lastMessage.id.includes('complete')) {
-                  const updatedMessages = [...prev];
-                  updatedMessages[updatedMessages.length - 1] = {
-                    ...lastMessage,
-                    content: formatAgentResponse(lastMessage.content + data.token)
-                  };
-                  return updatedMessages;
-                } else {
-                  return [...prev, {
-                    id: `streaming-${uuidv4()}`,
-                    content: data.token,
-                    sender: 'agent' as const,
-                    timestamp: new Date(),
-                    agentType: agentType
-                  }];
-                }
-              });
-            } else if (data.type === 'typing_status') {
-              setIsTyping(data.is_typing);
-            }
-          } catch (error) {
-            console.error('Error processing message:', error);
-          }
-        };
-        
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          // Keep input enabled regardless of connection status
-          // setIsConnected(false);
-        };
-        
-        ws.onclose = () => {
-          console.log('WebSocket connection closed');
-          // Keep input enabled regardless of connection status
-          // setIsConnected(false);
-          wsRef.current = null;
-        };
-        
-        wsRef.current = ws;
-      } catch (error) {
-        console.error('Failed to establish WebSocket connection:', error);
-        // Keep input enabled anyway - we don't want to block the user from typing
-        // setIsConnected(false);
+        console.log('WebSocket already exists in state:', 
+          wsRef.current.readyState === WebSocket.CONNECTING ? 'CONNECTING' : 
+          wsRef.current.readyState === WebSocket.OPEN ? 'OPEN' : 
+          wsRef.current.readyState === WebSocket.CLOSING ? 'CLOSING' : 'CLOSED');
       }
       
       // Cleanup on unmount or when closing chat
       return () => {
         if (wsRef.current) {
-          wsRef.current.close();
+          try {
+            wsRef.current.close();
+          } catch (e) {
+            console.error('Error closing WebSocket:', e);
+          }
           wsRef.current = null;
         }
-        
-        // Also stop recording if active
-        stopRecording();
       };
     }
   }, [isOpen, sessionId, agentType]);
@@ -180,6 +222,8 @@ export const AnonymousChatWidget: React.FC = () => {
   const handleSendMessage = () => {
     if (!inputValue.trim()) return;
     
+    console.log('Attempting to send message:', inputValue);
+    
     const newMessage = {
       id: uuidv4(),
       content: inputValue,
@@ -192,11 +236,39 @@ export const AnonymousChatWidget: React.FC = () => {
     // Send to WebSocket if connected
     if (wsRef.current) {
       try {
-        wsRef.current.send(JSON.stringify({
-          type: 'message',
-          content: inputValue,
-          timestamp: new Date().toISOString()
-        }));
+        console.log('WebSocket state before sending:', 
+          wsRef.current.readyState === WebSocket.CONNECTING ? 'CONNECTING' : 
+          wsRef.current.readyState === WebSocket.OPEN ? 'OPEN' : 
+          wsRef.current.readyState === WebSocket.CLOSING ? 'CLOSING' : 'CLOSED');
+        
+        // Only send if the connection is open
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          console.log('Sending message through WebSocket');
+          wsRef.current.send(JSON.stringify({
+            type: 'message',
+            content: inputValue,
+            timestamp: new Date().toISOString()
+          }));
+        } else {
+          console.warn('WebSocket not in OPEN state, cannot send message');
+          
+          // Try to reconnect if not in OPEN state
+          if (wsRef.current.readyState !== WebSocket.CONNECTING) {
+            console.log('Attempting to reconnect...');
+            connectWebSocket();
+          }
+          
+          // Add message about connection issue
+          setTimeout(() => {
+            setMessages(prev => [...prev, {
+              id: uuidv4(),
+              content: "Connecting to server... Your message will be sent once connected.",
+              sender: 'agent' as const,
+              timestamp: new Date(),
+              agentType: agentType
+            }]);
+          }, 500);
+        }
       } catch (error) {
         console.error('Failed to send message:', error);
         // Add a system message about connection issues
@@ -208,19 +280,25 @@ export const AnonymousChatWidget: React.FC = () => {
             timestamp: new Date(),
             agentType: agentType
           }]);
-        }, 1000);
+        }, 500);
       }
     } else {
       // If not connected, add a message indicating the connection issue
+      console.error('WebSocket not connected (null reference)');
+      
       setTimeout(() => {
         setMessages(prev => [...prev, {
           id: uuidv4(),
-          content: "Sorry, I'm having trouble connecting to the server. Your message couldn't be sent. Please try again later.",
+          content: "Sorry, I'm having trouble connecting to the server. Attempting to reconnect now...",
           sender: 'agent' as const,
           timestamp: new Date(),
           agentType: agentType
         }]);
-      }, 1000);
+      }, 500);
+      
+      // Try to connect
+      console.log('Attempting to connect WebSocket...');
+      connectWebSocket();
     }
     
     setInputValue('');
@@ -240,75 +318,150 @@ export const AnonymousChatWidget: React.FC = () => {
       
       // Check if mediaDevices is supported
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error('Browser does not support mediaDevices API');
         throw new Error('Browser does not support microphone access');
       }
       
-      // Show warning for non-secure context but still try to access microphone
-      // Note: This will likely fail in most browsers but we'll try anyway
-      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        console.warn('Warning: Attempting to access microphone on non-secure origin. This may fail in most browsers.');
-        setRecordingStatus('Warning: Non-secure connection may prevent microphone access');
-      }
+      console.log('Requesting microphone access with constraints...');
       
-      // Request microphone access with explicit constraints
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // Request microphone access with detailed constraints optimized for Google STT
+      // Google STT works best with LINEAR16 encoding (PCM) for non-WEBM files
+      // For WEBM files, OPUS codec is preferred
+      const constraints = {
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          channelCount: 1,         // Mono audio
+          sampleRate: 16000        // 16 kHz sample rate (Google STT preferred)
         }
-      });
+      };
       
-      // If we get here, we successfully accessed the microphone
+      console.log('Audio constraints:', JSON.stringify(constraints));
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       
-      // Set up the MediaRecorder with the audio stream
-      // Check for browser compatibility with different MIME types
-      let mimeType = 'audio/webm';
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mimeType = 'audio/webm;codecs=opus';
+      console.log('Microphone access granted, stream tracks:', stream.getAudioTracks().length);
+      
+      // Check if we actually got audio tracks
+      if (stream.getAudioTracks().length === 0) {
+        throw new Error('No audio tracks found in the media stream');
       }
       
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
+      // Log audio track settings
+      const audioTrack = stream.getAudioTracks()[0];
+      console.log('Audio track settings:', audioTrack.getSettings());
+      console.log('Audio track constraints:', audioTrack.getConstraints());
+      
+      // Set up the MediaRecorder with the audio stream
+      // Use the best format for Google STT - prefer WEBM with Opus codec
+      let mimeType = 'audio/webm;codecs=opus';
+      
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        // Fallback options
+        const supportedMimeTypes = [
+          'audio/webm',
+          'audio/ogg;codecs=opus',
+          'audio/wav',
+          'audio/mp4'
+        ];
+        
+        for (const type of supportedMimeTypes) {
+          if (MediaRecorder.isTypeSupported(type)) {
+            mimeType = type;
+            console.log(`Fallback to supported MIME type: ${mimeType}`);
+            break;
+          }
+        }
+      } else {
+        console.log(`Using optimal MIME type for Google STT: ${mimeType}`);
+      }
+      
+      // Create MediaRecorder with options
+      const options = { 
+        mimeType,
+        audioBitsPerSecond: 16000  // Match Google STT expectations
+      };
+      console.log('Creating MediaRecorder with options:', options);
+      const mediaRecorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
       
       // Event handler for data available
       mediaRecorder.ondataavailable = (event) => {
+        console.log(`Data available event: ${event.data.size} bytes`);
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+          console.log(`Added audio chunk, total chunks: ${audioChunksRef.current.length}`);
+        } else {
+          console.warn('Received empty data chunk');
         }
+      };
+      
+      // Event handler for recording start
+      mediaRecorder.onstart = () => {
+        console.log('MediaRecorder started');
+        setRecordingStatus('Recording audio... (Click stop when done)');
       };
       
       // Event handler for recording stop
       mediaRecorder.onstop = async () => {
+        console.log('MediaRecorder stopped, processing audio...');
         setRecordingStatus('Processing audio...');
         
         // Create a blob from the recorded audio chunks
+        console.log(`Creating blob from ${audioChunksRef.current.length} chunks`);
+        
+        // Make sure we got some audio data
+        if (audioChunksRef.current.length === 0 || audioChunksRef.current.every(chunk => chunk.size === 0)) {
+          setRecordingStatus('No audio was recorded. Please try again and speak clearly.');
+          console.error('No audio chunks were recorded');
+          
+          // Clean up
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        console.log(`Audio blob created: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
+        
+        // Check if the blob is suspiciously small
+        if (audioBlob.size < 1000) {
+          console.warn('Audio blob is very small, may not contain speech');
+        }
         
         // Send the audio blob to the backend for speech-to-text processing
         await sendAudioForSTT(audioBlob);
         
         // Clean up
+        console.log('Stopping audio tracks');
         stream.getTracks().forEach(track => track.stop());
+        console.log('Audio tracks stopped');
         setRecordingStatus('');
       };
       
-      // Start recording
-      mediaRecorder.start(1000); // Collect data every second
+      // Event handler for errors
+      mediaRecorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event);
+        setRecordingStatus(`Recording error: ${event.error}`);
+      };
+      
+      // Start recording with smaller time slices for more frequent ondataavailable events
+      console.log('Starting MediaRecorder...');
+      mediaRecorder.start(500); // Collect data every 500ms
       setIsRecording(true);
-      setRecordingStatus('Recording audio...');
+      
+      // Record for at least 2 seconds to ensure we get a valid audio file
+      setTimeout(() => {
+        console.log('Reminder: Click stop when you finish speaking');
+      }, 2000);
+      
     } catch (error: any) {
-      console.error('Error starting recording:', error);
+      console.error('Error starting recording:', error, error.name, error.message);
       setIsRecording(false);
       
       // Provide more helpful error messages based on the error
       if (error.name === 'NotAllowedError') {
-        if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-          setRecordingStatus('Microphone access denied: HTTP connections require HTTPS for microphone access. Try one of these options:\n1. Use HTTPS\n2. Deploy to localhost\n3. Use a service like ngrok');
-        } else {
-          setRecordingStatus('Microphone access denied. Please check your browser permissions.');
-        }
+        setRecordingStatus('Microphone access denied. Please check your browser permissions.');
       } else if (error.name === 'NotFoundError') {
         setRecordingStatus('No microphone found. Please connect a microphone and try again.');
       } else if (error.name === 'NotReadableError' || error.name === 'AbortError') {
@@ -325,39 +478,72 @@ export const AnonymousChatWidget: React.FC = () => {
       }, 10000);
     }
   };
-  
+
   const stopRecording = () => {
+    console.log('Stop recording called');
+    
     if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
+      try {
+        console.log('MediaRecorder state before stopping:', mediaRecorderRef.current.state);
+        
+        if (mediaRecorderRef.current.state === 'recording') {
+          console.log('Stopping MediaRecorder');
+          mediaRecorderRef.current.stop();
+          console.log('MediaRecorder stopped');
+        } else {
+          console.log('MediaRecorder not in recording state:', mediaRecorderRef.current.state);
+        }
+      } catch (error) {
+        console.error('Error stopping recording:', error);
+      }
+      
       setIsRecording(false);
+    } else {
+      console.log('No active MediaRecorder to stop:', 
+        mediaRecorderRef.current ? `Exists but not recording: ${mediaRecorderRef.current.state}` : 'No recorder');
     }
   };
   
   const sendAudioForSTT = async (audioBlob: Blob) => {
     try {
       // Log the audio blob details for debugging
-      console.log('Audio blob:', audioBlob.type, audioBlob.size, 'bytes');
+      console.log('Audio blob to send:', audioBlob.type, audioBlob.size, 'bytes');
+      
+      // For debugging, save and log the file name that would be sent
+      const fileName = `recording_${Date.now()}.${audioBlob.type.split('/')[1] || 'webm'}`;
+      console.log('File name will be:', fileName);
       
       // Create form data to send the audio file
       const formData = new FormData();
-      formData.append('audio_file', audioBlob, 'recording.webm');
+      
+      // Important: Use the exact field name expected by the backend
+      formData.append('audio_file', audioBlob, fileName);
+      
+      // Default language code
       formData.append('language_code', 'en-US');
       
-      // Don't specify sample rate for WEBM files (let Google auto-detect)
-      // This matches your backend implementation for WEBM files
+      // Explicitly set the encoding to match what we're sending
+      // This helps Google STT know how to process the audio
+      if (audioBlob.type.includes('webm')) {
+        // WebM uses Opus codec, which is supported by Google STT
+        console.log('Using WEBM audio format');
+      } else {
+        // If not using WebM, we should specify the sample rate
+        // as it might not be included in the audio metadata
+        console.log('Using non-WEBM audio format, adding sample rate');
+        formData.append('sample_rate', '16000');
+      }
       
-      // Determine the API endpoint (use environment variable or fallback)
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL 
-        ? `${process.env.NEXT_PUBLIC_API_URL}/speech-to-text`
-        : '/api/speech-to-text'; // Fallback to relative URL
+      // Use the correct API URL that we know works
+      const apiUrl = `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`;
       
-      console.log('Sending audio to:', apiUrl);
-      
-      // Send the request to the backend
+      console.log('Sending fetch request with FormData');
       const response = await fetch(apiUrl, {
         method: 'POST',
         body: formData,
       });
+      
+      console.log('Received response:', response.status, response.statusText);
       
       if (!response.ok) {
         const errorText = await response.text();
@@ -366,20 +552,23 @@ export const AnonymousChatWidget: React.FC = () => {
       }
       
       const data = await response.json();
-      console.log('STT response:', data);
+      console.log('STT response data:', data);
       
       if (data.success && data.transcript) {
         // Set the transcribed text as the input value
+        console.log('Setting transcript:', data.transcript);
         setInputValue(prev => prev + (prev ? ' ' : '') + data.transcript);
         setRecordingStatus('');
       } else if (data.error) {
         console.error('STT error:', data.error, data.details || '');
         
         // Check for common Google STT errors
-        if (data.details && data.details.includes('sample_rate_hertz')) {
-          setRecordingStatus('Audio format error: sample rate mismatch');
+        if (data.details && typeof data.details === 'string' && data.details.includes('sample_rate_hertz')) {
+          setRecordingStatus('Audio format error: sample rate mismatch. Trying again may help.');
         } else if (data.error.includes('No speech detected')) {
-          setRecordingStatus('No speech detected. Please try again.');
+          setRecordingStatus('No speech detected. Please try again and speak clearly.');
+        } else if (data.error.includes('Unexpected API response')) {
+          setRecordingStatus('Speech recognition service error. This could be a temporary issue with Google STT.');
         } else {
           setRecordingStatus(`Error: ${data.error}`);
         }
@@ -387,9 +576,10 @@ export const AnonymousChatWidget: React.FC = () => {
         // Clear error status after a few seconds
         setTimeout(() => {
           setRecordingStatus('');
-        }, 5000);
+        }, 8000);
       } else {
-        setRecordingStatus('No speech detected');
+        console.log('No transcript found in response');
+        setRecordingStatus('No speech detected or recognized. Please try again and speak clearly.');
         
         // Clear status after a few seconds
         setTimeout(() => {
@@ -401,7 +591,7 @@ export const AnonymousChatWidget: React.FC = () => {
       
       // Provide more user-friendly error message
       if (error.message && error.message.includes('Failed to fetch')) {
-        setRecordingStatus('Network error: Please check your connection');
+        setRecordingStatus('Network error: Cannot connect to API server');
       } else if (error.message) {
         setRecordingStatus(error.message);
       } else {
@@ -565,49 +755,59 @@ export const AnonymousChatWidget: React.FC = () => {
           </div>
         )}
         
-        <div className="flex gap-2 mb-2">
-          {/* Add warning message for HTTP development */}
-          {window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && (
+        <div className="flex flex-col gap-2">
+          {/* Connection Status */}
+          {!isConnected && (
             <div className="bg-yellow-100 text-yellow-800 text-xs p-2 rounded w-full">
-              Using HTTP: Microphone access may be blocked. Consider using HTTPS or <a href="#" className="underline font-bold" onClick={(e) => {
-                e.preventDefault();
-                alert("To use ngrok:\n1. Install: npm install -g ngrok\n2. Run: ngrok http <your-port-number>\n3. Use the HTTPS URL provided by ngrok");
-              }}>ngrok</a> for development.
+              Connection issue. Messages may not be sent. <button onClick={connectWebSocket} className="underline font-bold">Try reconnecting</button>
             </div>
           )}
+          
+          {/* Input Form */}
+          <form 
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSendMessage();
+            }}
+            className="flex gap-2"
+          >
+            <Input
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Type a message..."
+              className="flex-1"
+              aria-label="Message input"
+              autoComplete="off"
+              id="chat-input"
+              name="message"
+            />
+            
+            {/* Mic Button */}
+            <Button
+              type="button"
+              onClick={isRecording ? stopRecording : startRecording}
+              className={`${
+                isRecording 
+                  ? 'bg-red-600 hover:bg-red-700' 
+                  : 'bg-blue-600 hover:bg-blue-700'
+              } text-white`}
+              title={isRecording ? 'Stop recording' : 'Start recording'}
+            >
+              {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
+            </Button>
+            
+            {/* Send Button */}
+            <Button 
+              type="submit"
+              disabled={!inputValue.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              <Send size={16} />
+            </Button>
+          </form>
         </div>
         
-        <div className="flex gap-2">
-          <Input
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
-            className="flex-1"
-          />
-          
-          {/* Mic Button */}
-          <Button
-            onClick={isRecording ? stopRecording : startRecording}
-            className={`${
-              isRecording 
-                ? 'bg-red-600 hover:bg-red-700' 
-                : 'bg-blue-600 hover:bg-blue-700'
-            } text-white`}
-            title={isRecording ? 'Stop recording' : 'Start recording'}
-          >
-            {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
-          </Button>
-          
-          {/* Send Button */}
-          <Button 
-            onClick={handleSendMessage}
-            disabled={!inputValue.trim()}
-            className="bg-blue-600 hover:bg-blue-700 text-white"
-          >
-            <Send size={16} />
-          </Button>
-        </div>
         <div className="mt-2 text-xs text-gray-400 text-center">
           Chat is anonymous and not stored
         </div>
