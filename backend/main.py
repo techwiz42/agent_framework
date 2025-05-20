@@ -7,12 +7,22 @@ from uuid import UUID
 from fastapi import FastAPI, Request, APIRouter
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from app.db.session import db_manager
 from app.core.websocket_queue import initialize_connection_health, connection_health
 from app.core.config import settings
 from app.services.rag.storage_service import rag_storage_service
 from app.api import anonymous_websocket
+
+# Load environment variables from .env files
+load_dotenv()  # First try default .env file
+if os.path.exists('/home/peter/agent_framework/backend/.env'):
+    load_dotenv('/home/peter/agent_framework/backend/.env')
+if os.path.exists('/etc/cyberiad/.env'):
+    load_dotenv('/etc/cyberiad/.env')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -106,6 +116,9 @@ def register_routers(app: FastAPI):
     from app.api.google_router import router as google_router
     from app.api.onedrive_router import router as onedrive_router
     
+    # Register voice API routers
+    from app.api.voice import stt_router
+    
     # Log route information
     logger.info(f"Google router prefix: {google_router.prefix}")
     for route in google_router.routes:
@@ -133,10 +146,22 @@ def register_routers(app: FastAPI):
     
     app.include_router(documents_router, prefix="/api", tags=["documents"])
     
+    # Voice API routes
+    app.include_router(stt_router, prefix="/api/voice", tags=["voice"])
+    logger.info("Voice API router registered with prefix /api/voice")
+    
     # Anonymous chat functionality 
     app.include_router(anonymous_websocket.router, prefix="/ws")
     logger.info("Anonymous WebSocket router registered with prefix /ws")
     logger.info("Routes will be available at /ws/anonymous/{agent_type}")
+    
+    # Mount static files directory for test pages
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+    
+    # Add test routes for speech recognition
+    @app.get("/test/microphone")
+    async def test_microphone():
+        return FileResponse("static/test_microphone.html")
     
     # Log all routes
     logger.info("All routes registered. Registered routes:")
@@ -175,9 +200,19 @@ async def log_requests(request: Request, call_next):
     
     try:
         body = await request.body()
-        body_text = body.decode('utf-8')
-        if body_text:
-            print(f"Body: {body_text}")
+        # Only try to decode if the content-type is text-based
+        content_type = request.headers.get("content-type", "")
+        if content_type and ("json" in content_type or "text" in content_type or "form" in content_type):
+            try:
+                body_text = body.decode('utf-8')
+                if body_text:
+                    print(f"Body: {body_text}")
+            except UnicodeDecodeError:
+                # This is likely binary data (audio file, etc.)
+                print(f"Binary data received: {len(body)} bytes")
+        else:
+            # This is likely binary data (audio file, etc.)
+            print(f"Binary data received: {len(body)} bytes")
     except Exception as e:
         print(f"Could not read body: {e}")
 
@@ -192,6 +227,17 @@ async def add_cors_headers_for_websocket(request: Request, call_next):
     if request.url.path.startswith("/ws/"):
         response.headers["Access-Control-Allow-Origin"] = "*"
     return response
+
+# Handle legacy routes without /api prefix
+@app.middleware("http")
+async def redirect_legacy_voice_routes(request: Request, call_next):
+    # Check if this is a voice endpoint without the /api prefix
+    if request.url.path.startswith("/voice/"):
+        # Modify the request path to include the /api prefix
+        request.scope["path"] = f"/api{request.url.path}"
+        logger.info(f"Redirecting legacy voice route to: {request.scope['path']}")
+    
+    return await call_next(request)
 
 if __name__ == "__main__":
     port = int(settings.API_PORT)

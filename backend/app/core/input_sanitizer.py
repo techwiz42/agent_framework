@@ -156,5 +156,18 @@ class InputSanitizer:
         """
         return f"<user_message>\n{user_input}\n</user_message>"
 
+def sanitize_text(text: str) -> str:
+    """
+    Sanitizes text using the InputSanitizer.
+    
+    Args:
+        text: The text to sanitize
+        
+    Returns:
+        The sanitized text
+    """
+    sanitized_text, _, _ = InputSanitizer.sanitize_input(text)
+    return sanitized_text
+
 # Create singleton instance
 input_sanitizer = InputSanitizer()

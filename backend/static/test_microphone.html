@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Microphone and Speech-to-Text Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #2a5885;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+        button:hover {
+            background-color: #3367d6;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .container {
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        #volumeMeter {
+            width: 100%;
+            height: 20px;
+            background-color: #eee;
+            margin: 10px 0;
+            position: relative;
+        }
+        #volumeLevel {
+            height: 100%;
+            width: 0%;
+            background-color: #4CAF50;
+            transition: width 0.1s ease;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-left: 4px solid #4285f4;
+        }
+        #log {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            margin-top: 20px;
+        }
+        .error {
+            color: #d32f2f;
+        }
+        .success {
+            color: #388e3c;
+        }
+    </style>
+</head>
+<body>
+    <h1>Microphone and Speech-to-Text Test</h1>
+    
+    <div class="container">
+        <h2>Step 1: Microphone Access Test</h2>
+        <p>This test will check if your browser can access your microphone.</p>
+        <button id="testMicrophoneBtn">Test Microphone Access</button>
+        <div id="microphoneResult"></div>
+        
+        <div id="volumeTest" style="display: none;">
+            <h3>Volume Test</h3>
+            <p>Speak into your microphone to see if it's detecting sound:</p>
+            <div id="volumeMeter">
+                <div id="volumeLevel"></div>
+            </div>
+            <p id="volumeStatus">No sound detected</p>
+        </div>
+    </div>
+    
+    <div class="container">
+        <h2>Step 2: Speech-to-Text API Test</h2>
+        <p>This test will record audio and send it to the backend Speech-to-Text API.</p>
+        <button id="startRecordingBtn" disabled>Start Recording</button>
+        <button id="stopRecordingBtn" disabled>Stop Recording</button>
+        <div id="recordingStatus"></div>
+        <div id="apiResult" class="result" style="display: none;"></div>
+    </div>
+    
+    <div id="log"></div>
+
+    <script>
+        // DOM elements
+        const testMicrophoneBtn = document.getElementById('testMicrophoneBtn');
+        const microphoneResult = document.getElementById('microphoneResult');
+        const volumeTest = document.getElementById('volumeTest');
+        const volumeLevel = document.getElementById('volumeLevel');
+        const volumeStatus = document.getElementById('volumeStatus');
+        const startRecordingBtn = document.getElementById('startRecordingBtn');
+        const stopRecordingBtn = document.getElementById('stopRecordingBtn');
+        const recordingStatus = document.getElementById('recordingStatus');
+        const apiResult = document.getElementById('apiResult');
+        const logElement = document.getElementById('log');
+        
+        // State variables
+        let audioContext;
+        let mediaStream;
+        let mediaRecorder;
+        let audioChunks = [];
+        let analyser;
+        let volumeCheckInterval;
+        
+        // Log function for debugging
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            entry.className = type;
+            logElement.appendChild(entry);
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        // Test microphone access
+        testMicrophoneBtn.addEventListener('click', async () => {
+            try {
+                log('Requesting microphone access...');
+                microphoneResult.innerHTML = '<p>Requesting microphone access...</p>';
+                
+                // Request microphone access
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                log('Microphone access granted', 'success');
+                microphoneResult.innerHTML = '<p class="success">✅ Microphone access granted!</p>';
+                
+                // Enable recording button
+                startRecordingBtn.disabled = false;
+                
+                // Initialize audio context for volume meter
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                
+                // Show volume meter
+                volumeTest.style.display = 'block';
+                
+                // Start volume monitoring
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                
+                volumeCheckInterval = setInterval(() => {
+                    analyser.getByteFrequencyData(dataArray);
+                    
+                    // Calculate volume level (simple average)
+                    let sum = 0;
+                    for (let i = 0; i < bufferLength; i++) {
+                        sum += dataArray[i];
+                    }
+                    const average = sum / bufferLength;
+                    const volumePercentage = Math.min(100, average * 2); // Scale for better visualization
+                    
+                    // Update volume meter
+                    volumeLevel.style.width = `${volumePercentage}%`;
+                    
+                    // Update status text
+                    if (volumePercentage < 5) {
+                        volumeStatus.textContent = 'No sound detected';
+                        volumeLevel.style.backgroundColor = '#cccccc';
+                    } else if (volumePercentage < 20) {
+                        volumeStatus.textContent = 'Low volume detected';
+                        volumeLevel.style.backgroundColor = '#FFC107';
+                    } else {
+                        volumeStatus.textContent = 'Good volume detected';
+                        volumeLevel.style.backgroundColor = '#4CAF50';
+                    }
+                }, 100);
+                
+            } catch (error) {
+                log(`Error accessing microphone: ${error.message}`, 'error');
+                microphoneResult.innerHTML = `<p class="error">❌ Error accessing microphone: ${error.message}</p>`;
+                if (error.name === 'NotAllowedError') {
+                    microphoneResult.innerHTML += '<p>Please allow microphone access in your browser.</p>';
+                }
+            }
+        });
+        
+        // Start recording
+        startRecordingBtn.addEventListener('click', () => {
+            if (!mediaStream) {
+                log('No media stream available', 'error');
+                return;
+            }
+            
+            try {
+                log('Starting recording...');
+                audioChunks = [];
+                
+                // Determine supported mime type
+                const mimeType = MediaRecorder.isTypeSupported('audio/webm') 
+                    ? 'audio/webm' 
+                    : MediaRecorder.isTypeSupported('audio/mp4') 
+                        ? 'audio/mp4' 
+                        : '';
+                
+                if (!mimeType) {
+                    log('No supported audio recording format found', 'error');
+                    recordingStatus.innerHTML = '<p class="error">Your browser does not support audio recording formats.</p>';
+                    return;
+                }
+                
+                // Create MediaRecorder
+                mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    log('Recording stopped, processing audio...');
+                    recordingStatus.innerHTML = '<p>Processing audio...</p>';
+                    
+                    // Create blob from chunks
+                    const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                    
+                    // Send to API
+                    await sendToSTTAPI(audioBlob);
+                };
+                
+                // Start recording
+                mediaRecorder.start();
+                startRecordingBtn.disabled = true;
+                stopRecordingBtn.disabled = false;
+                recordingStatus.innerHTML = '<p>Recording... Speak clearly into your microphone.</p>';
+                log('Recording started');
+                
+            } catch (error) {
+                log(`Error starting recording: ${error.message}`, 'error');
+                recordingStatus.innerHTML = `<p class="error">Error starting recording: ${error.message}</p>`;
+            }
+        });
+        
+        // Stop recording
+        stopRecordingBtn.addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                stopRecordingBtn.disabled = true;
+                startRecordingBtn.disabled = false;
+                log('Stopping recording...');
+            }
+        });
+        
+        // Send audio to the STT API
+        async function sendToSTTAPI(audioBlob) {
+            try {
+                apiResult.style.display = 'none';
+                log(`Sending ${audioBlob.size} bytes to Speech-to-Text API...`);
+                
+                // Create form data
+                const formData = new FormData();
+                const fileExt = audioBlob.type.includes('webm') 
+                    ? 'webm' 
+                    : audioBlob.type.includes('mp4') 
+                        ? 'mp4' 
+                        : 'wav';
+                
+                formData.append('audio_file', audioBlob, `recording.${fileExt}`);
+                
+                // Get API URL
+                const apiUrl = '/api/voice/speech-to-text';
+                
+                // Send request
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                }
+                
+                // Process result
+                const result = await response.json();
+                log(`API response received: ${JSON.stringify(result)}`, 'success');
+                
+                apiResult.style.display = 'block';
+                
+                if (result.success && result.transcript) {
+                    apiResult.innerHTML = `
+                        <h3 class="success">Speech Detected! ✅</h3>
+                        <p><strong>Transcript:</strong> "${result.transcript}"</p>
+                        <p><strong>Confidence:</strong> ${(result.confidence * 100).toFixed(1)}%</p>
+                    `;
+                } else if (result.error === "No speech detected") {
+                    apiResult.innerHTML = `
+                        <h3 class="error">No Speech Detected ❌</h3>
+                        <p>The API couldn't detect any speech in your recording.</p>
+                        <p><strong>Troubleshooting:</strong></p>
+                        <ul>
+                            <li>Ensure your microphone is working (check the volume meter)</li>
+                            <li>Speak clearly and loudly when recording</li>
+                            <li>Reduce background noise</li>
+                            <li>Try a longer recording (3-5 seconds)</li>
+                        </ul>
+                    `;
+                } else {
+                    apiResult.innerHTML = `
+                        <h3 class="error">Error Processing Speech ❌</h3>
+                        <p><strong>Error:</strong> ${result.error || 'Unknown error'}</p>
+                        <p><strong>Details:</strong> ${result.details || 'No details provided'}</p>
+                    `;
+                }
+                
+                recordingStatus.innerHTML = '<p>Processing complete</p>';
+                
+            } catch (error) {
+                log(`Error sending to API: ${error.message}`, 'error');
+                apiResult.style.display = 'block';
+                apiResult.innerHTML = `
+                    <h3 class="error">Error ❌</h3>
+                    <p>${error.message}</p>
+                    <p>Is the server running?</p>
+                `;
+                recordingStatus.innerHTML = '<p class="error">Error communicating with the server</p>';
+            }
+        }
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (volumeCheckInterval) {
+                clearInterval(volumeCheckInterval);
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+        });
+    </script>
+</body>
+</html>

@@ -221,6 +221,8 @@ export const AnonymousChatWidget: React.FC = () => {
       handleSendMessage();
     }
   };
+  
+  // Voice functions have been removed
 
   // Toggle chat open/closed state
   const toggleChat = () => {
@@ -374,6 +376,8 @@ export const AnonymousChatWidget: React.FC = () => {
             placeholder="Type a message..."
             className="flex-1"
           />
+          
+          {/* Send Button */}
           <Button 
             onClick={handleSendMessage}
             disabled={!inputValue.trim()}
