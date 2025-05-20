@@ -1,6 +1,6 @@
 // src/components/chat/AnonymousChatWidget.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageCircle, X, Send, Bot, Minimize2, Maximize2 } from 'lucide-react';
+import { MessageCircle, X, Send, Bot, Minimize2, Maximize2, Mic, MicOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import SimpleBadge from '@/components/ui/SimpleBadge';
@@ -38,6 +38,14 @@ export const AnonymousChatWidget: React.FC = () => {
   const [isTyping, setIsTyping] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
   const [sessionId] = useState(uuidv4());
+  
+  // Speech-to-text states
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState('');
+  
+  // Speech-to-text refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   
   // Using CUSTOMERSERVICE agent
   const agentType = 'CUSTOMERSERVICE';
@@ -154,9 +162,12 @@ export const AnonymousChatWidget: React.FC = () => {
           wsRef.current.close();
           wsRef.current = null;
         }
+        
+        // Also stop recording if active
+        stopRecording();
       };
     }
-  }, [isOpen, sessionId, agentType]); // Remove isMinimized from dependencies
+  }, [isOpen, sessionId, agentType]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -222,7 +233,187 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   };
   
-  // Voice functions have been removed
+  // Speech-to-text functions
+  const startRecording = async () => {
+    try {
+      setRecordingStatus('Requesting microphone access...');
+      
+      // Check if mediaDevices is supported
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Browser does not support microphone access');
+      }
+      
+      // Show warning for non-secure context but still try to access microphone
+      // Note: This will likely fail in most browsers but we'll try anyway
+      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        console.warn('Warning: Attempting to access microphone on non-secure origin. This may fail in most browsers.');
+        setRecordingStatus('Warning: Non-secure connection may prevent microphone access');
+      }
+      
+      // Request microphone access with explicit constraints
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      
+      // If we get here, we successfully accessed the microphone
+      
+      // Set up the MediaRecorder with the audio stream
+      // Check for browser compatibility with different MIME types
+      let mimeType = 'audio/webm';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mimeType = 'audio/webm;codecs=opus';
+      }
+      
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      
+      // Event handler for data available
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      
+      // Event handler for recording stop
+      mediaRecorder.onstop = async () => {
+        setRecordingStatus('Processing audio...');
+        
+        // Create a blob from the recorded audio chunks
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        
+        // Send the audio blob to the backend for speech-to-text processing
+        await sendAudioForSTT(audioBlob);
+        
+        // Clean up
+        stream.getTracks().forEach(track => track.stop());
+        setRecordingStatus('');
+      };
+      
+      // Start recording
+      mediaRecorder.start(1000); // Collect data every second
+      setIsRecording(true);
+      setRecordingStatus('Recording audio...');
+    } catch (error: any) {
+      console.error('Error starting recording:', error);
+      setIsRecording(false);
+      
+      // Provide more helpful error messages based on the error
+      if (error.name === 'NotAllowedError') {
+        if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+          setRecordingStatus('Microphone access denied: HTTP connections require HTTPS for microphone access. Try one of these options:\n1. Use HTTPS\n2. Deploy to localhost\n3. Use a service like ngrok');
+        } else {
+          setRecordingStatus('Microphone access denied. Please check your browser permissions.');
+        }
+      } else if (error.name === 'NotFoundError') {
+        setRecordingStatus('No microphone found. Please connect a microphone and try again.');
+      } else if (error.name === 'NotReadableError' || error.name === 'AbortError') {
+        setRecordingStatus('Cannot access microphone. It may be in use by another application.');
+      } else if (error.message) {
+        setRecordingStatus(`Error: ${error.message}`);
+      } else {
+        setRecordingStatus('Failed to access microphone');
+      }
+      
+      // Show error message for longer since this is important
+      setTimeout(() => {
+        setRecordingStatus('');
+      }, 10000);
+    }
+  };
+  
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+  
+  const sendAudioForSTT = async (audioBlob: Blob) => {
+    try {
+      // Log the audio blob details for debugging
+      console.log('Audio blob:', audioBlob.type, audioBlob.size, 'bytes');
+      
+      // Create form data to send the audio file
+      const formData = new FormData();
+      formData.append('audio_file', audioBlob, 'recording.webm');
+      formData.append('language_code', 'en-US');
+      
+      // Don't specify sample rate for WEBM files (let Google auto-detect)
+      // This matches your backend implementation for WEBM files
+      
+      // Determine the API endpoint (use environment variable or fallback)
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL 
+        ? `${process.env.NEXT_PUBLIC_API_URL}/speech-to-text`
+        : '/api/speech-to-text'; // Fallback to relative URL
+      
+      console.log('Sending audio to:', apiUrl);
+      
+      // Send the request to the backend
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Server error:', response.status, errorText);
+        throw new Error(`Server responded with status ${response.status}: ${errorText}`);
+      }
+      
+      const data = await response.json();
+      console.log('STT response:', data);
+      
+      if (data.success && data.transcript) {
+        // Set the transcribed text as the input value
+        setInputValue(prev => prev + (prev ? ' ' : '') + data.transcript);
+        setRecordingStatus('');
+      } else if (data.error) {
+        console.error('STT error:', data.error, data.details || '');
+        
+        // Check for common Google STT errors
+        if (data.details && data.details.includes('sample_rate_hertz')) {
+          setRecordingStatus('Audio format error: sample rate mismatch');
+        } else if (data.error.includes('No speech detected')) {
+          setRecordingStatus('No speech detected. Please try again.');
+        } else {
+          setRecordingStatus(`Error: ${data.error}`);
+        }
+        
+        // Clear error status after a few seconds
+        setTimeout(() => {
+          setRecordingStatus('');
+        }, 5000);
+      } else {
+        setRecordingStatus('No speech detected');
+        
+        // Clear status after a few seconds
+        setTimeout(() => {
+          setRecordingStatus('');
+        }, 5000);
+      }
+    } catch (error: any) {
+      console.error('Error sending audio for STT:', error);
+      
+      // Provide more user-friendly error message
+      if (error.message && error.message.includes('Failed to fetch')) {
+        setRecordingStatus('Network error: Please check your connection');
+      } else if (error.message) {
+        setRecordingStatus(error.message);
+      } else {
+        setRecordingStatus('Failed to process speech');
+      }
+      
+      // Clear error status after a few seconds
+      setTimeout(() => {
+        setRecordingStatus('');
+      }, 5000);
+    }
+  };
 
   // Toggle chat open/closed state
   const toggleChat = () => {
@@ -368,6 +559,24 @@ export const AnonymousChatWidget: React.FC = () => {
       
       {/* Input */}
       <div className="border-t p-3">
+        {recordingStatus && (
+          <div className="mb-2 text-sm text-center text-blue-600 whitespace-pre-line">
+            {recordingStatus}
+          </div>
+        )}
+        
+        <div className="flex gap-2 mb-2">
+          {/* Add warning message for HTTP development */}
+          {window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && (
+            <div className="bg-yellow-100 text-yellow-800 text-xs p-2 rounded w-full">
+              Using HTTP: Microphone access may be blocked. Consider using HTTPS or <a href="#" className="underline font-bold" onClick={(e) => {
+                e.preventDefault();
+                alert("To use ngrok:\n1. Install: npm install -g ngrok\n2. Run: ngrok http <your-port-number>\n3. Use the HTTPS URL provided by ngrok");
+              }}>ngrok</a> for development.
+            </div>
+          )}
+        </div>
+        
         <div className="flex gap-2">
           <Input
             value={inputValue}
@@ -376,6 +585,19 @@ export const AnonymousChatWidget: React.FC = () => {
             placeholder="Type a message..."
             className="flex-1"
           />
+          
+          {/* Mic Button */}
+          <Button
+            onClick={isRecording ? stopRecording : startRecording}
+            className={`${
+              isRecording 
+                ? 'bg-red-600 hover:bg-red-700' 
+                : 'bg-blue-600 hover:bg-blue-700'
+            } text-white`}
+            title={isRecording ? 'Stop recording' : 'Start recording'}
+          >
+            {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
+          </Button>
           
           {/* Send Button */}
           <Button 

@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { Button } from '@/components/ui/button';
-import { AgentFrameworkLogo, RobotLogo } from '@/components/ui/logo';
+import { RobotLogo } from '@/components/ui/logo';
 import dynamic from 'next/dynamic';
 import Script from 'next/script';
 import Link from 'next/link';
