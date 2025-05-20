@@ -18,6 +18,10 @@ from app.services.agents.agent_manager import agent_manager, AGENTS
 from app.core.websocket_queue import connection_health
 from app.core.progress_manager import progress_manager
 from app.db.session import db_manager, ThreadAgent, ThreadParticipant, User, Message, MessageInfo, Thread, AsyncSessionLocal
+from app.services.rag import rag_storage_service
+# Redis services and queues have been removed
+# from app.services.redis.redis_service import redis_service
+# from app.services.redis.worker import Queues
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -163,6 +167,145 @@ async def _handle_typing_status(
         logger.error(f"Error handling typing status: {e}")
         logger.error(traceback.format_exc())
         # Don't re-raise the exception to prevent websocket disconnection
+
+async def _handle_editor_open(
+    db: AsyncSession,
+    conversation_id: UUID,
+    sender,
+    file_name: str,
+    file_type: str,
+    content: str
+) -> None:
+    """Process editor open event and broadcast to all clients."""
+    try:
+        # Determine sender identity
+        if isinstance(sender, ThreadAgent):
+            identifier = f"{sender.agent_type.lower()}@system.local"
+            sender_name = sender.agent_type
+            sender_email = identifier
+        elif not isinstance(sender, User):
+            # ParticipantUser
+            identifier = sender.email
+            sender_name = sender.name or sender.email
+            sender_email = sender.email
+        else:
+            # User
+            identifier = sender.email
+            sender_name = getattr(sender, 'username', None) or sender.email
+            sender_email = sender.email
+
+        # Broadcast the editor open event to all clients
+        await connection_health.broadcast(
+            conversation_id,
+            {
+                "type": "editor_open",
+                "fileName": file_name,
+                "fileType": file_type,
+                "content": content,
+                "identifier": identifier,
+                "timestamp": datetime.utcnow().isoformat(),
+                "sender": {
+                    "name": sender_name,
+                    "email": sender_email
+                }
+            }
+        )
+        logger.info(f"Editor open event broadcast for {file_name} in conversation {conversation_id}")
+    except Exception as e:
+        logger.error(f"Error handling editor open: {e}")
+        logger.error(traceback.format_exc())
+
+# In websockets.py - update _handle_editor_change
+async def _handle_editor_change(
+    db: AsyncSession,
+    conversation_id: UUID,
+    sender,
+    file_name: str,
+    content: str
+) -> None:
+    """Process editor change event and broadcast to all clients."""
+    try:
+        # Determine sender identity
+        if isinstance(sender, ThreadAgent):
+            identifier = f"{sender.agent_type.lower()}@system.local"
+            sender_name = sender.agent_type
+            sender_email = identifier
+        elif not isinstance(sender, User):
+            # ParticipantUser
+            identifier = sender.email
+            sender_name = sender.name or sender.email
+            sender_email = sender.email
+        else:
+            # User
+            identifier = sender.email
+            sender_name = getattr(sender, 'username', None) or sender.email
+            sender_email = sender.email
+
+        # Log message details for debugging
+        logger.info(f"Editor change from {sender_email} for {file_name} in conversation {conversation_id}")
+
+        # Broadcast the editor change event to all clients
+        await connection_health.broadcast(
+            conversation_id,
+            {
+                "type": "editor_change",  # Explicitly ensure this is editor_change
+                "fileName": file_name,
+                "content": content,
+                "identifier": identifier,
+                "timestamp": datetime.utcnow().isoformat(),
+                "sender": {
+                    "name": sender_name,
+                    "email": sender_email
+                }
+            }
+        )
+        logger.debug(f"Editor change event broadcast for {file_name} in conversation {conversation_id}")
+    except Exception as e:
+        logger.error(f"Error handling editor change: {e}")
+        logger.error(traceback.format_exc())
+
+async def _handle_editor_close(
+    db: AsyncSession,
+    conversation_id: UUID,
+    sender,
+    file_name: str
+) -> None:
+    """Process editor close event and broadcast to all clients."""
+    try:
+        # Determine sender identity
+        if isinstance(sender, ThreadAgent):
+            identifier = f"{sender.agent_type.lower()}@system.local"
+            sender_name = sender.agent_type
+            sender_email = identifier
+        elif not isinstance(sender, User):
+            # ParticipantUser
+            identifier = sender.email
+            sender_name = sender.name or sender.email
+            sender_email = sender.email
+        else:
+            # User
+            identifier = sender.email
+            sender_name = getattr(sender, 'username', None) or sender.email
+            sender_email = sender.email
+
+        # Broadcast the editor close event to all clients
+        await connection_health.broadcast(
+            conversation_id,
+            {
+                "type": "editor_close",
+                "fileName": file_name,
+                "identifier": identifier,
+                "timestamp": datetime.utcnow().isoformat(),
+                "sender": {
+                    "name": sender_name,
+                    "email": sender_email
+                }
+            }
+        )
+        logger.info(f"Editor close event broadcast for {file_name} in conversation {conversation_id}")
+    except Exception as e:
+        logger.error(f"Error handling editor close: {e}")
+        logger.error(traceback.format_exc())
 
 async def _handle_user_message(
     db: AsyncSession,
@@ -784,6 +927,44 @@ async def websocket_endpoint(
                                 "timestamp": datetime.utcnow().isoformat()
                             }
                         )
+                    elif message_type == "editor_open":
+                        content = message.get('content')
+                        file_name = message.get('fileName')
+                        file_type = message.get('fileType')
+
+                        if content and file_name and file_type:
+                            await _handle_editor_open(
+                                db=db,
+                                conversation_id=conversation_id,
+                                sender=user,
+                                file_name=file_name,
+                                file_type=file_type,
+                                content=content
+                            )
+
+                    elif message_type == "editor_change":
+                        content = message.get('content')
+                        file_name = message.get('fileName')
+
+                        if content and file_name:
+                            await _handle_editor_change(
+                                db=db,
+                                conversation_id=conversation_id,
+                                sender=user,
+                                file_name=file_name,
+                                content=content
+                            )
+
+                    elif message_type == "editor_close":
+                        file_name = message.get('fileName')
+
+                        if file_name:
+                            await _handle_editor_close(
+                                db=db,
+                                conversation_id=conversation_id,
+                                sender=user,
+                                file_name=file_name
+                            )
 
             except WebSocketDisconnect:
                 logger.info(f"WebSocket disconnected for {user.email}")

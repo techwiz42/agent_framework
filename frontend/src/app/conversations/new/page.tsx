@@ -1,279 +1,362 @@
-'use client'
-import React, { useState, useEffect } from 'react';
+'use client';
+
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
+import { conversationService } from '@/services/conversations';
+import { agentService } from '@/services/agents';
+import { MainLayout } from '@/components/layout/MainLayout';
 import { Button } from '@/components/ui/button';
-import { X, Plus, ArrowLeft } from 'lucide-react';
-import { createConversation } from '@/services/api';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Card, CardContent } from '@/components/ui/card';
+import { ErrorAlert } from '@/components/ui/error-alert';
+import { isValidEmail } from '@/lib/validation';
+import { toast } from '@/components/ui/use-toast';
+import { HelpCircle, ChevronDown, ChevronUp } from 'lucide-react';
 
-interface ParticipantInput {
-  email: string;
-  name?: string;
+interface ConversationFormState {
+  title: string;
+  description: string;
+  selectedAgents: string[];
+  participantEmails: string;
 }
 
-export default function NewConversationPage() {
-  const router = useRouter();
-  const { user, isLoading } = useAuth();
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [participants, setParticipants] = useState<ParticipantInput[]>([]);
-  const [newParticipantEmail, setNewParticipantEmail] = useState('');
-  const [newParticipantName, setNewParticipantName] = useState('');
-  const [selectedAgents, setSelectedAgents] = useState<string[]>(['BUSINESS', 'DATASEARCH']);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
+interface AgentButtonProps {
+  agent: string;
+  description: string;
+  isSelected: boolean;
+  onToggle: () => void;
+  disabled: boolean;
+}
 
-  // List of available agents
-  const availableAgents = [
-    { type: 'BUSINESS', label: 'Business Advisor', description: 'General business strategy and management advice' },
-    { type: 'BUSINESSINTELLIGENCE', label: 'Business Intelligence', description: 'Analytics and business metrics insights' },
-    { type: 'DATAANALYSIS', label: 'Data Analysis', description: 'Process and interpret complex datasets' },
-    { type: 'WEBSEARCH', label: 'Web Search', description: 'Search the web for information' },
-    { type: 'DOCUMENTSEARCH', label: 'Document Search', description: 'Search through uploaded documents' }
+const AgentButton = ({ 
+  agent, 
+  description, 
+  isSelected, 
+  onToggle, 
+  disabled 
+}: AgentButtonProps) => {
+  const formatAgentName = (agent: string): string => {
+    return agent
+      .toLowerCase()
+      .split('_')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  };
+
+  const showAgentInfo = () => {
+    toast({
+      title: formatAgentName(agent),
+      description: description,
+      duration: 5000
+    });
+  };
+
+  return (
+    <div className="relative">
+      <Button
+        type="button"
+        variant={isSelected ? "default" : "outline"}
+        onClick={onToggle}
+        className={`justify-start w-full pr-10 ${
+          disabled
+            ? 'bg-gray-200 cursor-not-allowed'
+            : isSelected
+              ? 'bg-green-100 hover:bg-green-200 border-green-500'
+              : ''
+        }`}
+        disabled={disabled}
+      >
+        {formatAgentName(agent)}
+      </Button>
+      
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          showAgentInfo();
+        }}
+        className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 p-0 hover:bg-gray-100 rounded-full flex items-center justify-center"
+      >
+        <HelpCircle className="h-4 w-4 text-blue-500" />
+      </button>
+    </div>
+  );
+};
+
+export default function CreateConversationPage() {
+  const router = useRouter();
+  const { token } = useAuth();
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [availableAgents, setAvailableAgents] = useState<string[]>([]);
+  const [agentDescriptions, setAgentDescriptions] = useState<Record<string, string>>({});
+  const [showAllAgents, setShowAllAgents] = useState(false);
+
+  // List of initially visible agents - AGENT_FRAMEWORK_GUIDE added at the beginning
+  const priorityAgents = [
+    'AGENT_FRAMEWORK_GUIDE', 'LEGAL', 'MEDICAL', 'BUSINESS', 'SUMMARY', 
+    'ENVIRONMENTAL', 'EXECUTIVEASSISTANT', 'CODEMONKEY', 'DOCUMENTSEARCH'
   ];
 
+  const [formData, setFormData] = useState<ConversationFormState>({
+    title: '',
+    description: '',
+    selectedAgents: ['MODERATOR', 'MONITOR'],
+    participantEmails: ''
+  });
+
   useEffect(() => {
-    if (!isLoading && !user) {
-      router.push('/login');
-    }
-  }, [isLoading, user, router]);
+    const fetchAgentData = async () => {
+      if (!token) {
+        console.error('Token is missing. Unable to fetch agents.');
+        return;
+      }
 
-  const addParticipant = () => {
-    if (!newParticipantEmail.trim()) return;
-    
-    // Simple email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(newParticipantEmail)) {
-      setError('Please enter a valid email address');
-      return;
-    }
-    
-    // Check if email already exists
-    if (participants.some(p => p.email.toLowerCase() === newParticipantEmail.toLowerCase())) {
-      setError('This participant has already been added');
-      return;
-    }
-    
-    setParticipants([...participants, { 
-      email: newParticipantEmail, 
-      name: newParticipantName.trim() || undefined 
-    }]);
-    setNewParticipantEmail('');
-    setNewParticipantName('');
-    setError('');
-  };
+      try {
+        // First get the available agents
+        const agents = await agentService.getAvailableAgents(token);
+        setAvailableAgents(agents);
+        
+        // Then get descriptions
+        const descriptions = await agentService.getAgentDescriptions(token);
+        setAgentDescriptions(descriptions);
+      } catch (error) {
+        console.error('Error fetching agent data:', error);
+        setError('Unable to load available agents. Please try again.');
+      }
+    };
 
-  const removeParticipant = (email: string) => {
-    setParticipants(participants.filter(p => p.email !== email));
-  };
-
-  const toggleAgent = (agentType: string) => {
-    setSelectedAgents(prev => 
-      prev.includes(agentType) 
-        ? prev.filter(a => a !== agentType)
-        : [...prev, agentType]
-    );
-  };
+    fetchAgentData();
+  }, [token]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!title.trim()) {
-      setError('Please enter a conversation title');
+    if (!token) {
+      setError('You must be logged in to create a conversation');
       return;
     }
-    
-    setIsSubmitting(true);
-    setError('');
-    
+
+    const emails = formData.participantEmails
+      ? formData.participantEmails
+          .split(',')
+          .map(email => email.trim())
+          .filter(email => email.length > 0)
+      : [];
+
+    if (emails.length > 0) {
+      const invalidEmails = emails.filter(email => !isValidEmail(email));
+      if (invalidEmails.length > 0) {
+        setError(`Invalid email addresses: ${invalidEmails.join(', ')}`);
+        return;
+      }
+    }
+
+    setIsLoading(true);
+    setError(null);
+
     try {
-      const conversation = await createConversation({
-        title: title.trim(),
-        description: description.trim() || undefined,
-        participants,
-        agent_types: [...selectedAgents]
-      });
-      
-      router.push(`/conversations/${conversation.id}`);
+      // Step 1: Create the conversation
+      const conversationResponse = await conversationService.createConversation({
+        title: formData.title,
+        description: formData.description,
+        selectedAgents: formData.selectedAgents,
+        participantEmails: emails
+      }, token);
+
+      // Step 2: Send invitations if there are participants
+      try {
+        const conversationId = conversationResponse?.data?.id;
+        if (conversationId) {
+          if (emails.length > 0) {
+            await conversationService.sendInvitations(conversationId, token);
+            toast({
+              title: "Success!",
+              description: `Conversation created and invitations sent to ${emails.length} participant${emails.length > 1 ? 's' : ''}.`,
+              variant: "default",
+              duration: 5000
+            });
+          } else {
+            toast({
+              title: "Success!",
+              description: "Conversation created successfully.",
+              variant: "default",
+              duration: 5000
+            });
+          }
+        router.push(`/conversations/${conversationId}`);
+	} else {
+          toast({
+            title: "Error",
+            description: "Failed to retrieve conversation ID.",
+            variant: "default",
+          });
+        }
+      } catch (inviteError) {
+        console.error('Error sending invitations:', inviteError);
+        toast({
+          title: "Partial Success",
+          description: "Conversation created but there was an error sending invitations. You can resend invitations later.",
+          variant: "default",
+          duration: 5000
+        });
+        router.push('/conversations');
+      }
     } catch (err) {
-      console.error('Failed to create conversation:', err);
-      setError('Failed to create conversation. Please try again.');
-      setIsSubmitting(false);
+      console.error('Error creating conversation:', err);
+      if (err instanceof Error) {
+        if (err.message.includes('unauthorized')) {
+          setError('Your session has expired. Please log in again.');
+        } else if (err.message.includes('network')) {
+          setError('Network error. Please check your connection and try again.');
+        } else {
+          setError(`Failed to create conversation: ${err.message}`);
+        }
+      } else {
+        setError('An unexpected error occurred while creating the conversation');
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center items-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-      </div>
-    );
-  }
+  const handleAgentToggle = (agent: string) => {
+    if (['MODERATOR', 'MONITOR'].includes(agent)) return;
+
+    setFormData(prev => ({
+      ...prev,
+      selectedAgents: prev.selectedAgents.includes(agent)
+        ? prev.selectedAgents.filter(a => a !== agent)
+        : [...prev.selectedAgents, agent]
+    }));
+  };
+
+  // Filter agents based on showAllAgents state and remove MODERATOR and MONITOR
+  const visibleAgents = availableAgents
+    .filter(agent => !['MODERATOR', 'MONITOR'].includes(agent))
+    .filter(agent => showAllAgents || priorityAgents.includes(agent.toUpperCase()));
+
+  const hiddenAgentsCount = availableAgents.length - visibleAgents.length;
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-3xl">
-      <button
-        onClick={() => router.back()}
-        className="flex items-center text-blue-600 mb-6 hover:underline"
-      >
-        <ArrowLeft size={16} className="mr-1" />
-        Back
-      </button>
-      
-      <h1 className="text-2xl font-bold mb-6">Create New Conversation</h1>
-      
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {error && (
-          <div className="bg-red-50 text-red-700 p-3 rounded-md">
-            {error}
-          </div>
-        )}
-        
-        <div>
-          <label htmlFor="title" className="block text-sm font-medium text-gray-700 mb-1">
-            Title *
-          </label>
-          <input
-            type="text"
-            id="title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md"
-            placeholder="Enter conversation title"
-            required
-          />
-        </div>
-        
-        <div>
-          <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-1">
-            Description (optional)
-          </label>
-          <textarea
-            id="description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md"
-            rows={3}
-            placeholder="Enter a brief description of this conversation"
-          />
-        </div>
-        
-        <div>
-          <h3 className="text-lg font-medium mb-3">Select AI Agents</h3>
-          <p className="text-sm text-gray-500 mb-4">
-            Choose which specialized AI agents to include in this conversation
-          </p>
-          <div className="grid sm:grid-cols-2 gap-3">
-            {availableAgents.map((agent) => (
-              <div 
-                key={agent.type}
-                className={`border rounded-md p-3 cursor-pointer transition-colors ${
-                  selectedAgents.includes(agent.type) 
-                    ? 'bg-blue-50 border-blue-300' 
-                    : 'border-gray-300 hover:bg-gray-50'
-                }`}
-                onClick={() => toggleAgent(agent.type)}
-              >
-                <div className="flex items-start">
-                  <input
-                    type="checkbox"
-                    checked={selectedAgents.includes(agent.type)}
-                    onChange={() => {}} // Handled by div click
-                    className="mt-1 mr-3"
-                  />
-                  <div>
-                    <div className="font-medium">{agent.label}</div>
-                    <div className="text-sm text-gray-500">{agent.description}</div>
-                  </div>
-                </div>
+    <MainLayout title="Create New Conversation">
+      <div className="max-w-2xl mx-auto">
+        <Card>
+          <CardContent className="pt-6">
+            <form onSubmit={handleSubmit} className="space-y-6">
+              {error && (
+                <ErrorAlert
+                  error={error}
+                  onDismiss={() => setError(null)}
+                />
+              )}
+
+              <div className="space-y-2">
+                <label htmlFor="title" className="text-sm font-medium text-gray-700">
+                  Title
+                </label>
+                <Input
+                  id="title"
+                  value={formData.title}
+                  onChange={e => setFormData(prev => ({ ...prev, title: e.target.value }))}
+                  required
+                  placeholder="Enter conversation title"
+                />
               </div>
-            ))}
-          </div>
-        </div>
-        
-        <div>
-          <h3 className="text-lg font-medium mb-3">Add Participants (optional)</h3>
-          
-          <div className="flex items-start space-x-2 mb-4">
-            <div className="flex-1">
-              <input
-                type="email"
-                value={newParticipantEmail}
-                onChange={(e) => setNewParticipantEmail(e.target.value)}
-                className="w-full p-2 border border-gray-300 rounded-md mb-2"
-                placeholder="Email address"
-              />
-              <input
-                type="text"
-                value={newParticipantName}
-                onChange={(e) => setNewParticipantName(e.target.value)}
-                className="w-full p-2 border border-gray-300 rounded-md"
-                placeholder="Name (optional)"
-              />
-            </div>
-            <Button 
-              type="button" 
-              onClick={addParticipant}
-              className="flex-shrink-0 mt-1"
-            >
-              <Plus size={16} className="mr-1" />
-              Add
-            </Button>
-          </div>
-          
-          {participants.length > 0 && (
-            <div className="border rounded-md p-3 bg-gray-50">
-              <h4 className="font-medium mb-2">Participants</h4>
-              <ul className="space-y-2">
-                {participants.map((participant) => (
-                  <li 
-                    key={participant.email}
-                    className="flex justify-between items-center bg-white p-2 rounded border"
+
+              <div className="space-y-2">
+                <label htmlFor="participants" className="text-sm font-medium text-gray-700">
+                  Invite Participants
+                </label>
+                <Input
+                  id="participants"
+                  value={formData.participantEmails}
+                  onChange={e => setFormData(prev => ({ ...prev, participantEmails: e.target.value }))}
+                  placeholder="Optional: name@example.com, name2@example.com"
+                />
+                <p className="text-sm text-gray-500">
+                  Enter email addresses separated by commas (optional)
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-gray-700">
+                    Select AI Participants
+                  </label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowAllAgents(!showAllAgents)}
+                    className="text-blue-600 border-blue-300 hover:bg-blue-50 flex items-center gap-1"
                   >
-                    <div>
-                      <div>{participant.name || participant.email}</div>
-                      {participant.name && (
-                        <div className="text-sm text-gray-500">{participant.email}</div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeParticipant(participant.email)}
-                      className="text-gray-400 hover:text-red-500"
-                      aria-label="Remove participant"
-                    >
-                      <X size={16} />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-        
-        <div className="flex justify-end pt-4">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => router.push('/conversations')}
-            className="mr-3"
-            disabled={isSubmitting}
-          >
-            Cancel
-          </Button>
-          <Button 
-            type="submit" 
-            disabled={isSubmitting || !title.trim()}
-          >
-            {isSubmitting ? (
-              <>
-                <div className="animate-spin rounded-full h-4 w-4 border-2 border-b-transparent mr-2"></div>
-                Creating...
-              </>
-            ) : 'Create Conversation'}
-          </Button>
-        </div>
-      </form>
-    </div>
+                    {showAllAgents ? (
+                      <>
+                        <ChevronUp className="h-4 w-4" />
+                        Hide Additional Agents
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-4 w-4" />
+                        Show {hiddenAgentsCount} More Agents
+                      </>
+                    )}
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {visibleAgents.map(agent => (
+                    <AgentButton
+                      key={agent}
+                      agent={agent}
+                      description={agentDescriptions[agent] || 'Loading description...'}
+                      isSelected={formData.selectedAgents.includes(agent)}
+                      onToggle={() => handleAgentToggle(agent)}
+                      disabled={agent === 'MODERATOR' || agent === 'MONITOR'}
+                    />
+                  ))}
+                </div>
+                <p className="text-sm text-gray-500">
+                  Moderator and Monitor agents are automatically included in every conversation
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="description" className="text-sm font-medium text-gray-700">
+                  Description
+                </label>
+                <Textarea
+                  id="description"
+                  value={formData.description}
+                  onChange={e => setFormData(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Enter conversation description (optional)"
+                  className="w-full min-h-[100px]"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => router.push('/conversations')}
+                  className="bg-yellow-50 hover:bg-yellow-100 border-yellow-500 text-yellow-700"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isLoading}
+                  className="bg-green-600 hover:bg-green-700 text-white"
+                >
+                  {isLoading ? 'Creating conversation...' : 'Create Conversation'}
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
+    </MainLayout>
   );
 }

@@ -1,100 +1,12 @@
 from typing import Any, Callable, List, Optional, Union, Type, Dict, TypeVar, Generic
+from agents import Agent, ModelSettings, AgentHooks
+from agents.tool import Tool, FunctionTool
+from agents.run_context import TContext, RunContextWrapper
 import inspect
 import logging
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-# For now, we'll define some placeholders for the agents SDK
-# In a full implementation, these would be imported from a proper SDK
-class AgentHooks:
-    """Base agent hooks class for handling agent events."""
-    
-    async def init_context(self, context: Any) -> None:
-        """Initialize the context for an agent."""
-        pass
-    
-    async def on_handoff(self, context: Any, agent: Any, source: Any) -> None:
-        """Called when control is handed to another agent."""
-        pass
-
-class ModelSettings:
-    """Settings for the agent model."""
-    
-    def __init__(
-        self,
-        tool_choice: Optional[str] = None,
-        parallel_tool_calls: bool = True,
-        temperature: float = 0.7,
-        top_p: float = 1.0,
-        frequency_penalty: float = 0,
-        presence_penalty: float = 0,
-        max_tokens: Optional[int] = None,
-        truncation: Optional[bool] = None
-    ):
-        self.tool_choice = tool_choice
-        self.parallel_tool_calls = parallel_tool_calls
-        self.temperature = temperature
-        self.top_p = top_p
-        self.frequency_penalty = frequency_penalty
-        self.presence_penalty = presence_penalty
-        self.max_tokens = max_tokens
-        self.truncation = truncation
-
-class Tool:
-    """Base tool class for agent tools."""
-    
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
-
-class FunctionTool(Tool):
-    """Tool that wraps a function."""
-    
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        params_json_schema: Dict[str, Any],
-        on_invoke_tool: Callable
-    ):
-        super().__init__(name, description)
-        self.params_json_schema = params_json_schema
-        self.on_invoke_tool = on_invoke_tool
-        self.schema = {
-            "name": name,
-            "description": description,
-            "parameters": params_json_schema
-        }
-
-class RunContextWrapper:
-    """Wrapper for the run context."""
-    
-    def __init__(self, context: Any):
-        self.context = context
-
-# Make BaseAgent generic over the context type
-T = TypeVar('T')
-
-class Agent(Generic[T]):
-    """Base Agent class that will be extended."""
-    
-    def __init__(
-        self,
-        name: str,
-        model: str,
-        instructions: Union[str, Callable[[Any, Any], str]],
-        tools: List[Tool] = None,
-        model_settings: ModelSettings = None,
-        hooks: AgentHooks = None
-    ):
-        self.name = name
-        self.model = model
-        self.instructions = instructions
-        self.tools = tools or []
-        self.model_settings = model_settings or ModelSettings()
-        self.hooks = hooks
-        self.description = ""
 
 class BaseAgentHooks(AgentHooks):
     """Custom hooks for all agents to ensure context is properly initialized."""
@@ -118,10 +30,16 @@ class BaseAgentHooks(AgentHooks):
         else:
             logger.warning("[CONTEXT_DEBUG] Context initialized but no 'context' attribute found")
 
-class BaseAgent(Agent[T]):
+# Make BaseAgent generic over the context type
+T = TypeVar('T')
+
+class BaseAgent(Agent, Generic[T]):
     """
-    BaseAgent is a wrapper around the Agent SDK, providing compatibility with
-    various LLM providers while maintaining a consistent interface.
+    BaseAgent is a wrapper around OpenAI's Agent SDK, providing compatibility with
+    code originally written for the Swarm framework.
+    
+    This class inherits from Agent SDK's Agent class but provides additional methods
+    and attributes to maintain compatibility with existing code.
     """
     
     def __init__(
@@ -187,6 +105,7 @@ class BaseAgent(Agent[T]):
         # Add standard hooks if not provided
         self.hooks = kwargs.get('hooks', None)
         if not self.hooks:
+            from agents import AgentHooks
             self.hooks = BaseAgentHooks()
     
     def _build_instructions_with_context(self, ctx, base_instructions):
@@ -234,58 +153,49 @@ class BaseAgent(Agent[T]):
                         # The function already has a schema, this is likely an SDK function_tool
                         tools.append(func)
                     else:
-                        # Create a FunctionTool from the function
-                        # In a real implementation, this would use proper function_tool decorator
-                        tool = self._create_function_tool(func)
+                        # We need to import function_tool here to avoid circular import
+                        from agents import function_tool
+                        # Attempt to convert to a function tool
+                        tool = function_tool(func)
+                        
+                        # Validate the schema
+                        self._validate_function_schema(func, tool)
+                        
                         tools.append(tool)
                 except Exception as e:
                     logger.error(f"Error converting function {getattr(func, '__name__', 'unknown')} to tool: {str(e)}")
+                    # Create a sanitized version of the function
                     tools.append(self._create_sanitized_function_tool(func))
         return tools
     
-    def _create_function_tool(self, func: Callable) -> FunctionTool:
+    def _validate_function_schema(self, func: Callable, tool: FunctionTool) -> None:
         """
-        Create a FunctionTool from a function.
+        Validate that the function tool's schema is correctly formed.
         
         Args:
-            func: The function to create a tool from.
-            
-        Returns:
-            A FunctionTool.
+            func: The original function.
+            tool: The FunctionTool created from the function.
         """
-        func_name = getattr(func, "__name__", "unknown_function")
+        if not hasattr(tool, "schema") or not isinstance(tool.schema, dict):
+            return
         
-        # Get function signature to derive parameters
-        sig = inspect.signature(func)
-        params = sig.parameters
-        
-        # Create parameters schema
-        properties = {}
-        required = []
-        
-        for name, param in params.items():
-            properties[name] = {
-                "type": "string",  # Default to string as a safe type
-                "description": f"Parameter {name} for function {func_name}"
-            }
+        schema = tool.schema
+        if "parameters" not in schema:
+            return
             
-            # If parameter has no default value, mark it as required
-            if param.default == inspect.Parameter.empty:
-                required.append(name)
+        parameters = schema["parameters"]
+        if "properties" not in parameters or "required" not in parameters:
+            return
+            
+        properties = parameters["properties"]
+        required = parameters["required"]
         
-        params_schema = {
-            "type": "object",
-            "properties": properties,
-            "required": required
-        }
-        
-        # Create the tool
-        return FunctionTool(
-            name=func_name,
-            description=getattr(func, "__doc__", f"Function {func_name}"),
-            params_json_schema=params_schema,
-            on_invoke_tool=lambda ctx, args: func(**args)
-        )
+        # Ensure all required fields are in properties
+        invalid_required = [field for field in required if field not in properties]
+        if invalid_required:
+            logger.warning(f"Function {tool.name} has required fields that are not in properties: {invalid_required}")
+            # Fix the required array
+            parameters["required"] = [field for field in required if field in properties]
     
     def _create_sanitized_function_tool(self, func: Callable) -> FunctionTool:
         """
@@ -319,9 +229,13 @@ class BaseAgent(Agent[T]):
                     required.append(name)
             
             schema = {
-                "type": "object",
-                "properties": properties,
-                "required": required
+                "name": func_name,
+                "description": getattr(func, "__doc__", f"Function {func_name}"),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
             }
             
             # Create a wrapper function that logs calls and returns an error message
@@ -334,33 +248,47 @@ class BaseAgent(Agent[T]):
                     logger.error(error_msg)
                     return error_msg
             
+            # Add schema attributes to the wrapper
+            safe_wrapper.schema = schema
+            # The wrapper function needs to be callable
+            safe_wrapper.__call__ = safe_wrapper
+            
             # Create the tool
-            return FunctionTool(
+            tool = FunctionTool(
                 name=func_name,
-                description=getattr(func, "__doc__", f"Function {func_name}"),
-                params_json_schema=schema,
-                on_invoke_tool=lambda ctx, args: safe_wrapper(**args)
+                description=schema["description"],
+                params_json_schema=schema["parameters"],
+                on_invoke_tool=lambda ctx, args: safe_wrapper(ctx, args)
             )
+            
+            return tool
         
         except Exception as e:
             logger.error(f"Error creating sanitized function tool for {func_name}: {str(e)}")
             
             # Create a minimal valid schema as fallback
             schema = {
-                "type": "object",
-                "properties": {},
-                "required": []
+                "name": func_name,
+                "description": f"Function {func_name} (sanitized)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             }
             
             # Create a no-op function
             def no_op_function(*args, **kwargs):
                 return f"Error: Function {func_name} is unavailable due to schema validation issues."
             
+            # Add schema attributes to the no-op function
+            no_op_function.schema = schema
+            
             # Return a no-op function tool
             return FunctionTool(
                 name=func_name,
-                description=f"Function {func_name} (sanitized)",
-                params_json_schema=schema,
+                description=schema["description"],
+                params_json_schema=schema["parameters"],
                 on_invoke_tool=lambda ctx, args: no_op_function()
             )
     
@@ -401,7 +329,10 @@ class BaseAgent(Agent[T]):
             self.tools.append(func)
         else:
             try:
-                tool = self._create_function_tool(func)
+                # Import at function level to avoid circular import
+                from agents import function_tool
+                tool = function_tool(func)
+                self._validate_function_schema(func, tool)
                 self.tools.append(tool)
             except Exception as e:
                 logger.error(f"Error adding function {getattr(func, '__name__', 'unknown')}: {str(e)}")
@@ -422,24 +353,87 @@ class BaseAgent(Agent[T]):
         # Remove from tools list
         self.tools = [t for t in self.tools if t.name != func_name]
     
-    async def execute(self, context: RunContextWrapper[T], message: str) -> str:
+    def get_function(self, func_name: str) -> Optional[Any]:
         """
-        Execute the agent with the given message and context.
+        Get a function by name.
         
         Args:
-            context: The context wrapper for this execution.
-            message: The user message to respond to.
+            func_name: The name of the function to get.
             
         Returns:
-            The agent's response.
+            The function if found, otherwise None.
         """
-        # This is a simplified placeholder - in a real implementation, 
-        # this would call the appropriate LLM API
-        logger.info(f"Executing agent {self.name} with message: {message[:50]}...")
+        for func in self._functions:
+            if hasattr(func, '__name__') and func.__name__ == func_name:
+                return func
+            elif hasattr(func, 'name') and func.name == func_name:
+                return func
+        return None
+    
+    def set_tool_choice(self, tool_choice: Optional[str]) -> None:
+        """
+        Set the tool choice strategy for this agent.
         
-        # Initialize the context if hooks are provided
-        if self.hooks:
-            await self.hooks.init_context(context)
+        Args:
+            tool_choice: The tool choice strategy to use.
+        """
+        # Update the model settings with the new tool choice
+        self.model_settings = ModelSettings(
+            tool_choice=tool_choice,
+            parallel_tool_calls=self.model_settings.parallel_tool_calls,
+            temperature=self.model_settings.temperature,
+            top_p=self.model_settings.top_p,
+            frequency_penalty=self.model_settings.frequency_penalty,
+            presence_penalty=self.model_settings.presence_penalty,
+            max_tokens=self.model_settings.max_tokens,
+            truncation=self.model_settings.truncation
+        )
+    
+    def set_parallel_tool_calls(self, parallel_tool_calls: bool) -> None:
+        """
+        Set whether to allow the agent to call multiple tools in parallel.
         
-        # For now, return a placeholder response
-        return f"Response from {self.name} agent (This is a placeholder)"
+        Args:
+            parallel_tool_calls: Whether to allow the agent to call multiple tools in parallel.
+        """
+        # Update the model settings with the new parallel tool calls setting
+        self.model_settings = ModelSettings(
+            tool_choice=self.model_settings.tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            temperature=self.model_settings.temperature,
+            top_p=self.model_settings.top_p,
+            frequency_penalty=self.model_settings.frequency_penalty,
+            presence_penalty=self.model_settings.presence_penalty,
+            max_tokens=self.model_settings.max_tokens,
+            truncation=self.model_settings.truncation
+        )
+    
+    def clone(self, **kwargs) -> "BaseAgent[T]":
+        """
+        Create a copy of this agent with the given overrides.
+        
+        Args:
+            **kwargs: Attributes to override in the cloned agent.
+            
+        Returns:
+            A new BaseAgent instance with the specified overrides.
+        """
+        # Get all current parameters that aren't None
+        current_params = {
+            "name": self.name,
+            "model": self.model,
+            "instructions": self.instructions,
+            "functions": self._functions.copy() if self._functions else [],
+            "tool_choice": self.model_settings.tool_choice,
+            "parallel_tool_calls": self.model_settings.parallel_tool_calls,
+        }
+        
+        # Include max_tokens if it's set
+        if hasattr(self.model_settings, 'max_tokens') and self.model_settings.max_tokens is not None:
+            current_params["max_tokens"] = self.model_settings.max_tokens
+        
+        # Update with any provided kwargs
+        current_params.update(kwargs)
+        
+        # Create a new instance with the updated parameters
+        return BaseAgent(**current_params)

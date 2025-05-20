@@ -9,6 +9,8 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
+from agents import Agent, Runner, RunConfig, ModelSettings
+
 from app.core.config import settings
 from app.services.agents.agent_interface import agent_interface
 
@@ -431,7 +433,7 @@ class CollaborationManager:
     async def _get_agent_response(
         self,
         agent_name: str,
-        agent: Any,
+        agent: Agent,
         query: str,
         is_primary: bool,
         thread_id: Optional[str] = None
@@ -465,15 +467,49 @@ class CollaborationManager:
             Your response will be combined with other specialist agents to create a comprehensive answer.
             """
             
-            # For simplified implementation, just return a placeholder response
-            # In a real implementation, this would use the agent.execute method or similar
-            response = f"This is a placeholder response from the {agent_name} agent acting as a {role} agent."
-            if hasattr(agent, 'execute'):
-                # In a real implementation, we would create the appropriate context wrapper
-                # and call agent.execute(context, collab_prompt)
-                response = f"The {agent_name} agent would analyze the query: '{query}' from its expertise as a {role} agent."
+            # Create run config
+            run_config = RunConfig(
+                workflow_name=f"{agent_name} Collaboration",
+                model_settings=ModelSettings(
+                    temperature=0.5  # Slightly higher for more diverse perspectives
+                )
+            )
             
-            return agent_name, response
+            # Prefix message to identify agent in streaming output
+            if streaming_callback:
+                await streaming_callback(f"\n\n[{agent_name} is thinking...]\n")
+                
+            # Run the agent with streaming support
+            streamed_result = Runner.run_streamed(
+                starting_agent=agent,
+                input=collab_prompt,
+                context={"thread_id": thread_id, "is_collaboration": True},
+                run_config=run_config
+            )
+            
+            # Process streaming tokens
+            tokens = []
+            async for event in streamed_result.stream_events():
+                # Look for text delta events
+                if (hasattr(event, 'type') and 
+                    event.type == "raw_response_event" and
+                    hasattr(event.data, 'type') and
+                    event.data.type == "response.output_text.delta" and
+                    hasattr(event.data, 'delta')):
+                    token = event.data.delta
+                    if token:  # Only append non-empty tokens
+                        tokens.append(token)
+                        if streaming_callback:
+                            await streaming_callback(token)
+            
+            # Get final output
+            final_output = streamed_result.final_output or ''.join(tokens)
+            
+            # Agent completion message with explicit end token
+            if streaming_callback:
+                await streaming_callback(f"\n\n[{agent_name} has completed]\n[DONE]")
+                
+            return agent_name, str(final_output)
             
         except Exception as e:
             logger.error(f"Error getting response from {agent_name}: {e}")

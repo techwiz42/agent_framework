@@ -185,6 +185,8 @@ async def create_conversation(
             owner_id=current_user.id
         )
 
+        # Cache invalidation has been removed
+
         # Load final thread with relationships
         final_result = await db.execute(
             select(Thread)
@@ -407,9 +409,71 @@ async def send_conversation_invitations(
             detail=f"Failed to send invitations: {str(e)}"
         )
 
+@router.post("/register", response_model=Token)
+async def register_user(
+    user_data: UserAuth,
+    db: AsyncSession = Depends(db_manager.get_session)
+):
+    try:
+        existing_user = await db_manager.get_user_by_username(db, user_data.username)
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        hashed_password = auth_manager.get_password_hash(user_data.password)
+        user = await db_manager.create_user(
+            db, user_data.username, user_data.email, hashed_password
+        )
+        
+        access_token = auth_manager.create_access_access_token(data={"sub": user.username})
+        return Token(
+            access_token=access_token,
+            token_type="bearer",
+            user_id=str(user.id),
+            username=user.username
+        )
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.post("/token", response_model=Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(db_manager.get_session)
+):
+    user = await auth_manager.authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password"
+        )
+    
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Please verify your email address before logging in"
+        )
+        
+    access_token = auth_manager.create_access_token(data={"sub": user.username})
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        user_id=str(user.id),
+        username=user.username
+    )
+
 class JoinRequest(BaseModel):
     invitation_token: str
     name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class ParticipantJoinResponse(BaseModel):
+    message: str
+    conversation_id: str
+    participant_token: str
+    name: Optional[str]
+    email: str
 
     class Config:
         from_attributes = True
@@ -442,7 +506,7 @@ async def join_conversation(
             select(ThreadParticipant).where(ThreadParticipant.thread_id == thread_id)
         )
         all_participants = all_participants.scalars().all()
-        logger.info(f"Participants in DB for thread_id {thread_id}: {all_participants}")
+        logger.error(f"DEBUG: Participants in DB for thread_id {thread_id}: {all_participants}")
 
         # Ensure invitation exists for the participant
         result = await db.execute(
@@ -456,6 +520,9 @@ async def join_conversation(
         if not participant:
             logger.error(f"Invitation not found for thread_id: {thread_id}, email: {email}")
             raise HTTPException(status_code=404, detail="Invitation not found")
+
+        # Debug: Validate the stored invitation token in DB
+        logger.error(f"Stored invitation_token in DB: {participant.invitation_token}")
 
         # Ensure participant name is updated if provided
         if join_data.name:
@@ -473,6 +540,8 @@ async def join_conversation(
         # Handle conversation change (formerly invalidated caches)
         await handle_conversation_change(thread_id)
 
+        # Log the generated token for verification
+        logger.info(f"Generated Participant Token: {participant_token}")
         return ParticipantJoinResponse(
             message="Successfully joined conversation",
             conversation_id=str(thread_id),

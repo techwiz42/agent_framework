@@ -7,7 +7,9 @@ from pydantic import BaseModel, EmailStr, constr
 class UserAuth(BaseModel):
     username: str
     email: EmailStr
+    phone: str
     password: str
+    password_confirm: str
 
 class Token(BaseModel):
     access_token: str
@@ -15,7 +17,7 @@ class Token(BaseModel):
     user_id: str
     username: str
     email: str
-    role: Optional[str] = None
+    phone: Optional[str] = None
 
 # Participant Schemas
 class ParticipantCreate(BaseModel):
@@ -169,6 +171,22 @@ class RegistrationResponse(BaseModel):
     message: str
     email: str
 
+class MessageResponse(BaseModel):
+    id: UUID
+    thread_id: UUID
+    content: str
+    created_at: datetime
+    participant_id: Optional[UUID] = None
+    agent_id: Optional[UUID] = None
+    message_metadata: Dict[str, Any] = {}
+
+    class Config:
+        from_attributes = True  # This allows Pydantic to convert from SQLAlchemy models
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat(),
+            UUID: lambda uuid: str(uuid)
+        }
+
 # Update Schemas
 class ConversationUpdate(BaseModel):
     """Request model for updating an existing conversation"""
@@ -187,3 +205,4 @@ class ParticipantJoinResponse(BaseModel):
 
     class Config:
         from_attributes = True
+

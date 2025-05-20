@@ -159,10 +159,16 @@ class SecurityManager:
             return False
 
 
-    async def authenticate_user(self, db: AsyncSession, username: str, password: str):
+    async def authenticate_user(self, db: AsyncSession, identifier: str, password: str):
         try:
+            # Check if identifier is an email or username
             result = await db.execute(
-                select(User).where(User.username == username)
+                select(User).where(
+                    or_(
+                        User.username == identifier,
+                        User.email == identifier
+                    )
+                )
             )
             user = result.scalar_one_or_none()
         
@@ -461,18 +467,7 @@ def rate_limit(limit: str, duration: int):
         return wrapper
     return decorator
 
-def create_email_verification_token(data: Dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(hours=24)  # 24 hour expiry
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-def verify_email_token(token: str) -> Optional[Dict]:
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        return payload
-    except JWTError:
-        return None
+# Email verification token functions removed as they are no longer needed
 
 def create_password_reset_token(email: str) -> str:
     """Generate a time-limited password reset token."""

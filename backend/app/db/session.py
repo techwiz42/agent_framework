@@ -13,7 +13,7 @@ from app.models.domain.models import Base, User, Thread, ThreadParticipant, Mess
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARN,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ class DatabaseManager:
             logger.error(f"Error disposing connection pool: {e}")
             raise
 
-    # Database operation methods
+    # Existing database operation methods with connection pooling...
     async def get_user_by_username(self, session: AsyncSession, username: str):
         result = await session.execute(select(User).where(User.username == username))
         return result.scalars().first()
@@ -139,16 +139,16 @@ class DatabaseManager:
         username: str,
         email: str,
         hashed_password: str,
-        verification_token: str = None
+        phone: str = None
     ) -> User:
         try:
             user = User(
                 username=username,
                 email=email,
+                phone=phone,
                 hashed_password=hashed_password,
                 created_at=datetime.utcnow(),
-                email_verification_token=verification_token,
-                email_verification_sent_at=datetime.utcnow(),
+                is_active=True,
                 tokens_purchased=50000, 
                 tokens_consumed=0
             )
@@ -196,6 +196,24 @@ class DatabaseManager:
                 .where(ThreadAgent.is_active == True)
             )
             return result.scalars().all()
+
+    async def get_user_threads(self, session: AsyncSession, user_id: UUID):
+        try:
+            result = await session.execute(
+                select(Thread)
+                .outerjoin(ThreadParticipant)
+                .outerjoin(ThreadAgent)
+                .where(Thread.owner_id == user_id)
+                .options(
+                    joinedload(Thread.participants),
+                    joinedload(Thread.agents)
+                )
+                .order_by(desc(Thread.updated_at))
+            )
+            return result.scalars().unique().all()
+        except Exception as e:
+            logger.error(f"Error getting user threads: {e}")
+            raise
 
     async def add_thread_participant(
         self,

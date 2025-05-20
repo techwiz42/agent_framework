@@ -10,9 +10,10 @@ import enum
 from typing import Optional, List
 import os
 
-from app.core.config import settings
-
-DATABASE_URL = settings.DATABASE_URL
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/cyberiad"
+)
 
 engine = create_async_engine(
     DATABASE_URL,
@@ -42,14 +43,12 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
+    phone = Column(String, nullable=True)
     hashed_password = Column(String)
     role = Column(Enum(UserRole, name='user_role'), default=UserRole.USER)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime)
     is_active = Column(Boolean, default=True)
-    email_verified = Column(Boolean, default=False)
-    email_verification_token = Column(String, unique=True, nullable=True)
-    email_verification_sent_at = Column(DateTime, nullable=True)
     tokens_purchased = Column(Integer, default=0)
     tokens_consumed = Column(Integer, default=0)
     stripe_customer_id = Column(String, unique=True, nullable=True)
@@ -65,8 +64,8 @@ class User(Base):
         return purchased - consumed
 
     # Relationships
-    owned_threads = relationship("Thread", back_populates="owner")
-    read_receipts = relationship("MessageReadReceipt", back_populates="user")
+    owned_threads = relationship("Thread", back_populates="owner", cascade="all, delete-orphan")
+    read_receipts = relationship("MessageReadReceipt", back_populates="user", cascade="all, delete-orphan")
 
 class Thread(Base):
     __tablename__ = "threads"
@@ -74,7 +73,7 @@ class Thread(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String, nullable=False)
     description = Column(Text)
-    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     status = Column(Enum(ThreadStatus), default=ThreadStatus.ACTIVE)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -92,19 +91,19 @@ class Message(Base):
     __tablename__ = "messages"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    thread_id = Column(UUID(as_uuid=True), ForeignKey("threads.id"), nullable=False)
-    participant_id = Column(UUID(as_uuid=True), ForeignKey("thread_participants.id"), nullable=True)
-    agent_id = Column(UUID(as_uuid=True), ForeignKey("thread_agents.id"), nullable=True)
+    thread_id = Column(UUID(as_uuid=True), ForeignKey("threads.id", ondelete="CASCADE"), nullable=False)
+    participant_id = Column(UUID(as_uuid=True), ForeignKey("thread_participants.id", ondelete="SET NULL"), nullable=True)
+    agent_id = Column(UUID(as_uuid=True), ForeignKey("thread_agents.id", ondelete="SET NULL"), nullable=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    parent_id = Column(UUID(as_uuid=True), ForeignKey("messages.id"), nullable=True)
+    parent_id = Column(UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
 
     # Message organization
     thread = relationship("Thread", back_populates="messages")
     participant = relationship("ThreadParticipant", back_populates="messages")
     agent = relationship("ThreadAgent", back_populates="messages")
     parent = relationship("Message", remote_side=[id], backref="replies")
-    read_receipts = relationship("MessageReadReceipt", back_populates="message")
+    read_receipts = relationship("MessageReadReceipt", back_populates="message", cascade="all, delete-orphan")
     message_info = relationship("MessageInfo",
                                 back_populates="message", 
                                 cascade="all, delete-orphan",
@@ -122,7 +121,7 @@ class MessageInfo(Base):
     __tablename__ = "message_info"
 
     id = Column(Integer, primary_key=True, index=True)
-    message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id"), nullable=False)
+    message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
     file_name = Column(String)
     file_type = Column(String)
     file_size = Column(Integer)
@@ -159,7 +158,7 @@ class ThreadParticipant(Base):
     
     # Relationships
     thread = relationship("Thread", back_populates="participants")
-    messages = relationship("Message", back_populates="participant")
+    messages = relationship("Message", back_populates="participant", cascade="all, delete-orphan")
 
     # Email must be unique within a thread
     __table_args__ = (
@@ -178,7 +177,7 @@ class ThreadAgent(Base):
     
     # Relationships
     thread = relationship("Thread", back_populates="agents")
-    messages = relationship("Message", back_populates="agent")
+    messages = relationship("Message", back_populates="agent", cascade="all, delete-orphan")
 
     # Only one agent of each type per thread
     __table_args__ = (
@@ -196,3 +195,23 @@ class MessageReadReceipt(Base):
     # Relationships
     message = relationship("Message", back_populates="read_receipts")
     user = relationship("User", back_populates="read_receipts")
+
+# Database Manager Class
+class DatabaseManager:
+    def __init__(self):
+        self.engine = engine
+        self.SessionLocal = AsyncSessionLocal
+
+    async def create_tables(self):
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def get_session(self):
+        async with self.SessionLocal() as session:
+            try:
+                yield session
+            finally:
+                await session.close()
+
+# Create database manager instance
+db_manager = DatabaseManager()

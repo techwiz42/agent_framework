@@ -1,349 +1,226 @@
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, Any, Optional, List, Union, Callable
 import logging
-import json
-import inspect
-import datetime
-
+import re
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.services.agents.base_agent import BaseAgent, AgentHooks, RunContextWrapper
-from app.services.agents.common_context import CommonAgentContext
+
+from agents import (
+    function_tool,
+    RunContextWrapper,
+    GuardrailFunctionOutput,
+    input_guardrail,
+    ModelSettings
+)
+from app.services.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
-# Placeholder for function_tool decorator
-def function_tool(func):
-    return func
+# Custom context type for monitor agent
+class MonitorContext:
+    def __init__(self, thread_id: str, db: AsyncSession):
+        self.thread_id = thread_id
+        self.db = db
+        self.conversation_history: List[Dict[str, Any]] = []
+        self.addressed_directly: bool = False
 
-class MonitorAgentHooks(AgentHooks):
-    """Custom hooks for the monitor agent."""
-
-    async def init_context(self, context: RunContextWrapper[Any]) -> None:
-        """
-        Initialize context for the MonitorAgent.
-        
-        Args:
-            context: The context wrapper object with conversation data
-        """
-        # Call parent implementation
-        await super().init_context(context)
-        
-        logger.info(f"Initialized context for MonitorAgent")
 
 @function_tool
-async def get_system_status() -> str:
-    """
-    Get current system status including all services and components.
-    
-    Returns:
-        JSON string with system status information
-    """
-    # This is a simplified implementation that returns mock system status
-    # In a real implementation, this would check various services and components
-    
-    logger.info("Getting system status")
-    
-    # Current time
-    current_time = datetime.datetime.now().isoformat()
-    
-    # Mock system status
-    status = {
-        "timestamp": current_time,
-        "overall_status": "healthy",
-        "components": [
-            {
-                "name": "API Server",
-                "status": "healthy",
-                "uptime": "5d 12h 37m",
-                "load": "23%",
-                "response_time": "42ms"
-            },
-            {
-                "name": "Database",
-                "status": "healthy",
-                "uptime": "15d 8h 12m",
-                "connections": 12,
-                "query_performance": "normal"
-            },
-            {
-                "name": "Authentication Service",
-                "status": "healthy",
-                "uptime": "5d 12h 35m",
-                "active_sessions": 87
-            },
-            {
-                "name": "Document Processing Service",
-                "status": "healthy",
-                "uptime": "5d 11h 56m",
-                "queue_length": 0,
-                "processed_last_hour": 12
-            },
-            {
-                "name": "Vector Database",
-                "status": "healthy",
-                "uptime": "10d 22h 45m",
-                "index_count": 5,
-                "total_vectors": 125430
-            },
-            {
-                "name": "Storage Service",
-                "status": "healthy",
-                "uptime": "15d 8h 10m",
-                "usage": "42%",
-                "io_performance": "normal"
-            }
-        ],
-        "recent_events": [
-            {
-                "timestamp": (datetime.datetime.now() - datetime.timedelta(hours=2)).isoformat(),
-                "component": "Document Processing Service",
-                "type": "info",
-                "message": "Processed large batch of 250 documents"
-            },
-            {
-                "timestamp": (datetime.datetime.now() - datetime.timedelta(minutes=45)).isoformat(),
-                "component": "API Server",
-                "type": "info",
-                "message": "Traffic spike handled successfully"
-            }
-        ]
-    }
-    
-    # In a real implementation, this would:
-    # 1. Check status of all system components
-    # 2. Collect metrics from monitoring systems
-    # 3. Check recent logs for issues
-    
-    return json.dumps(status)
-
-@function_tool
-async def get_agent_metrics(
-    agent_type: Optional[str] = None,
-    time_period: Optional[str] = "24h"
+async def analyze_conversation(
+    context: RunContextWrapper[MonitorContext],
+    analysis_type: str,
+    specific_focus: Optional[str] = None
 ) -> str:
     """
-    Get usage metrics for agents.
+    Analyze the conversation based on the specified analysis type.
     
     Args:
-        agent_type: Optional agent type to filter for (e.g., "BUSINESS")
-        time_period: Time period for metrics (e.g., "1h", "24h", "7d", "30d")
-        
+        analysis_type: Type of analysis to perform (summary, key_points, disagreements, etc.)
+        specific_focus: Optional specific aspect to focus on
+    
     Returns:
-        JSON string with agent metrics
+        A detailed analysis based on the requested type
     """
-    # This is a simplified implementation that returns mock agent metrics
-    # In a real implementation, this would query a metrics database
+    # This is mostly a placeholder as the LLM will have access to the conversation history
+    # and will perform the analysis based on the instructions and context
     
-    logger.info(f"Getting agent metrics (agent: {agent_type}, period: {time_period})")
+    history = context.context.conversation_history
     
-    # Mock time periods to timestamps
-    now = datetime.datetime.now()
-    time_ranges = {
-        "1h": now - datetime.timedelta(hours=1),
-        "24h": now - datetime.timedelta(days=1),
-        "7d": now - datetime.timedelta(days=7),
-        "30d": now - datetime.timedelta(days=30)
-    }
+    analysis_intro = f"# {analysis_type.title()} Analysis"
+    if specific_focus:
+        analysis_intro += f": {specific_focus}"
     
-    start_time = time_ranges.get(time_period, time_ranges["24h"])
+    # Just return the intro - the actual analysis will be performed by the LLM
+    # based on the full conversation history
+    return analysis_intro
+
+
+@input_guardrail
+def validate_monitor_request(
+    context: RunContextWrapper[MonitorContext],
+    agent: Any,
+    input: str
+) -> GuardrailFunctionOutput:
+    """
+    Validate that the monitor agent is being addressed directly with @MONITOR.
+    If not addressed directly, the agent should not respond.
+    """
+    # Check if the input contains @MONITOR
+    is_addressed = bool(re.search(r'@MONITOR', input, re.IGNORECASE))
     
-    # Define mock data for different agent types
-    agent_metrics = {
-        "MODERATOR": {
-            "invocations": 1250,
-            "avg_response_time": 0.8,
-            "routing_accuracy": 0.95,
-            "collaboration_rate": 0.32
-        },
-        "BUSINESS": {
-            "invocations": 450,
-            "avg_response_time": 2.3,
-            "tool_usage_rate": 0.62,
-            "user_satisfaction": 0.88
-        },
-        "BUSINESSINTELLIGENCE": {
-            "invocations": 325,
-            "avg_response_time": 2.1,
-            "tool_usage_rate": 0.78,
-            "user_satisfaction": 0.91
-        },
-        "DATAANALYSIS": {
-            "invocations": 275,
-            "avg_response_time": 2.6,
-            "tool_usage_rate": 0.83,
-            "user_satisfaction": 0.86
-        },
-        "WEBSEARCH": {
-            "invocations": 625,
-            "avg_response_time": 3.2,
-            "search_success_rate": 0.92,
-            "user_satisfaction": 0.84
-        },
-        "DOCUMENTSEARCH": {
-            "invocations": 580,
-            "avg_response_time": 2.8,
-            "search_success_rate": 0.89,
-            "user_satisfaction": 0.87
-        },
-        "MONITOR": {
-            "invocations": 120,
-            "avg_response_time": 1.2,
-            "tool_usage_rate": 0.95,
-            "user_satisfaction": 0.90
-        }
-    }
-    
-    # Create response
-    if agent_type and agent_type in agent_metrics:
-        # Single agent metrics
-        metrics = {
-            "agent_type": agent_type,
-            "time_period": time_period,
-            "start_time": start_time.isoformat(),
-            "end_time": now.isoformat(),
-            "metrics": agent_metrics[agent_type],
-            "hourly_activity": [
-                {"hour": (now - datetime.timedelta(hours=i)).strftime("%Y-%m-%d %H:00"), 
-                 "invocations": int(agent_metrics[agent_type]["invocations"] / 24 * (1 + 0.2 * (i % 3 - 1)))}
-                for i in range(24, 0, -1)
-            ]
-        }
+    # Store the result in context for later use
+    # Ensure context.context is a MonitorContext object, not a dict
+    if isinstance(context.context, dict):
+        # Create MonitorContext if context was passed as dict
+        thread_id = context.context.get('thread_id', '')
+        db = context.context.get('db', None)
+        monitor_ctx = MonitorContext(thread_id=thread_id, db=db)
+        monitor_ctx.addressed_directly = is_addressed
+        context.context = monitor_ctx
     else:
-        # All agents metrics
-        metrics = {
-            "time_period": time_period,
-            "start_time": start_time.isoformat(),
-            "end_time": now.isoformat(),
-            "total_invocations": sum(m["invocations"] for m in agent_metrics.values()),
-            "agent_metrics": agent_metrics,
-            "agent_distribution": [
-                {"agent": agent, "percentage": metrics["invocations"] / sum(m["invocations"] for m in agent_metrics.values())}
-                for agent, metrics in agent_metrics.items()
-            ]
-        }
+        # Normal case when context is already a MonitorContext
+        context.context.addressed_directly = is_addressed
     
-    # In a real implementation, this would:
-    # 1. Query metrics database for agent usage statistics
-    # 2. Aggregate metrics over the requested time period
-    # 3. Calculate derived metrics like success rates
+    if not is_addressed:
+        return GuardrailFunctionOutput(
+            output_info="Monitor agent not directly addressed with @MONITOR",
+            tripwire_triggered=True
+        )
     
-    return json.dumps(metrics)
+    return GuardrailFunctionOutput(
+        output_info="Monitor agent directly addressed",
+        tripwire_triggered=False
+    )
 
-@function_tool
-async def get_user_activity(
-    time_period: Optional[str] = "24h"
-) -> str:
+
+class MonitorAgent(BaseAgent[MonitorContext]):
     """
-    Get user activity metrics.
+    Agent that silently monitors conversations and provides analysis when requested.
+    Only responds when explicitly addressed with @MONITOR.
+    """
     
-    Args:
-        time_period: Time period for metrics (e.g., "1h", "24h", "7d", "30d")
+    def __init__(self, model: str = settings.DEFAULT_AGENT_MODEL):
+        """Initialize the MonitorAgent with specific instructions and tools."""
+        instructions = """You are a monitoring agent that silently observes conversations. You ONLY respond when explicitly addressed with @MONITOR. Your role is to provide analysis and insights about the conversation when requested.
+
+KEY BEHAVIORS:
+1. Stay completely silent unless directly addressed with @MONITOR
+2. When addressed, analyze the conversation based on the specific request
+3. Consider the full context of the discussion
+4. Draw insights from the complete conversation history
+
+ANALYSIS CAPABILITIES:
+When asked, you can:
+- Summarize the discussion and its key points
+- Identify main arguments and counterarguments presented
+- Track how positions and ideas have evolved
+- Point out areas of agreement and disagreement
+- Identify unresolved questions or issues
+- Highlight patterns or recurring themes
+- Note gaps in the discussion
+
+GUIDELINES:
+- Respond ONLY to direct @MONITOR mentions
+- Focus on observation and analysis rather than participation
+- Base all analysis strictly on the conversation content
+- Support observations with specific references from the discussion
+- Maintain complete neutrality
+- Present analysis clearly and objectively
+- Acknowledge limitations in available information
+
+WHAT NOT TO DO:
+- Do not participate unless directly addressed with @MONITOR
+- Do not provide advice unless specifically requested
+- Do not take sides in disagreements
+- Do not make assumptions beyond available information
+- Do not reveal private conversation details elsewhere
+- Do not pretend to have information from outside the conversation
+
+EXAMPLE RESPONSES TO:
+"@MONITOR summarize our discussion so far"
+"@MONITOR what are the key points of disagreement?"
+"@MONITOR how have the positions evolved?"
+"@MONITOR what issues remain unresolved?"
+"@MONITOR analyze the main arguments presented"
+"""
         
-    Returns:
-        JSON string with user activity metrics
-    """
-    # This is a simplified implementation that returns mock user activity
-    # In a real implementation, this would query a metrics database
-    
-    logger.info(f"Getting user activity metrics (period: {time_period})")
-    
-    # Mock time periods to timestamps
-    now = datetime.datetime.now()
-    time_ranges = {
-        "1h": now - datetime.timedelta(hours=1),
-        "24h": now - datetime.timedelta(days=1),
-        "7d": now - datetime.timedelta(days=7),
-        "30d": now - datetime.timedelta(days=30)
-    }
-    
-    start_time = time_ranges.get(time_period, time_ranges["24h"])
-    
-    # Mock user activity metrics
-    metrics = {
-        "time_period": time_period,
-        "start_time": start_time.isoformat(),
-        "end_time": now.isoformat(),
-        "active_users": 125,
-        "new_users": 18,
-        "total_conversations": 430,
-        "avg_conversation_length": 12,
-        "avg_response_time": 2.1,
-        "user_satisfaction": 0.87,
-        "hourly_activity": [
-            {"hour": (now - datetime.timedelta(hours=i)).strftime("%Y-%m-%d %H:00"), 
-             "active_users": int(125 / 24 * (1 + 0.3 * (i % 4 - 1.5))),
-             "new_conversations": int(430 / 24 * (1 + 0.25 * (i % 3 - 1)))}
-            for i in range(24, 0, -1)
-        ],
-        "top_user_locations": [
-            {"location": "United States", "percentage": 0.42},
-            {"location": "United Kingdom", "percentage": 0.15},
-            {"location": "Canada", "percentage": 0.12},
-            {"location": "Germany", "percentage": 0.08},
-            {"location": "Australia", "percentage": 0.06},
-            {"location": "Other", "percentage": 0.17}
-        ],
-        "device_distribution": [
-            {"device": "Desktop", "percentage": 0.65},
-            {"device": "Mobile", "percentage": 0.30},
-            {"device": "Tablet", "percentage": 0.05}
-        ]
-    }
-    
-    # In a real implementation, this would:
-    # 1. Query metrics database for user activity
-    # 2. Aggregate metrics over the requested time period
-    # 3. Calculate derived metrics like satisfaction rates
-    
-    return json.dumps(metrics)
-
-class MonitorAgent(BaseAgent):
-    """
-    Monitor agent that tracks system health, agent performance, and provides operational insights.
-    """
-    
-    def __init__(self, name="MONITOR"):
         super().__init__(
-            name=name,
-            instructions="""You are a monitoring agent specializing in system health, agent performance, and operational insights.
-
-YOUR EXPERTISE:
-- System status monitoring
-- Agent performance analytics
-- Usage pattern detection
-- Operational health assessment
-- Technical troubleshooting
-- Performance optimization recommendations
-- System status reporting
-
-APPROACH:
-- Provide clear, factual status information
-- Highlight critical metrics and issues
-- Translate technical metrics into business impact
-- Identify trends and unusual patterns
-- Provide context for performance data
-- Recommend specific actions when issues are detected
-- Use data visualizations when describing complex metrics
-
-RESPONSE FORMAT:
-- Begin with an overall system health assessment
-- Organize metrics in logical categories
-- Use tables for presenting comparative metrics
-- Highlight critical issues or anomalies
-- Include trend information when available
-- End with recommendations if applicable
-
-When using monitoring tools, focus on extracting the most relevant metrics for the user's query rather than providing all available data.
-
-Remember that your primary role is to make system status and performance understandable and actionable, even for users without technical backgrounds.""",
-            functions=[get_system_status, get_agent_metrics, get_user_activity],
-            hooks=MonitorAgentHooks()
+            name="MONITOR",
+            model=model,
+            instructions=instructions,
+            functions=[
+                analyze_conversation
+            ],
+            tool_choice=None,
+            parallel_tool_calls=True,
+            output_type=str
         )
         
-        # Add description property
-        self.description = "Monitors agent activity and system health"
+        # Add the input guardrail to enforce direct addressing
+        self.input_guardrails.append(validate_monitor_request)
+    
+    @property
+    def description(self) -> str:
+        """Get the description of the MonitorAgent."""
+        return "Silently monitors conversations and provides analysis, summaries, and insights when directly addressed with @MONITOR"
+    
+    async def init_context(self, context: RunContextWrapper[MonitorContext]) -> None:
+        """
+        Initialize the agent context.
+        
+        Args:
+            context: The context wrapper containing MonitorContext
+        """
+        # Any additional context initialization can be done here
+        # For example, if we needed to load conversation history from the database
+        pass
+    
+    async def process_message(
+        self,
+        db: AsyncSession,
+        thread_id: str,
+        query: str
+    ) -> Optional[str]:
+        """
+        Process a direct message to the monitor agent.
+        This is maintained for backward compatibility with existing code.
+        
+        Args:
+            db: Database session
+            thread_id: Thread identifier
+            query: User query message
+            
+        Returns:
+            Response from the monitor agent if addressed directly, None otherwise
+        """
+        from agents import Runner, RunConfig
+        
+        try:
+            # Create context
+            context = MonitorContext(thread_id=thread_id, db=db)
+            
+            # Check if the monitor is being addressed directly
+            if not re.search(r'@MONITOR', query, re.IGNORECASE):
+                # Not addressed directly, remain silent
+                return None
+            
+            # Run the agent
+            result = await Runner.run(
+                starting_agent=self,
+                input=query,
+                context=context,
+                run_config=RunConfig(
+                    workflow_name="Monitor Analysis"
+                )
+            )
+            
+            return result.final_output
+            
+        except Exception as e:
+            logger.error(f"Error processing monitor query: {e}")
+            # If there's an error, we'll still return None to maintain the behavior
+            # of being silent unless properly addressed
+            return None
 
-# Create the monitor agent instance
+
+# Create singleton instance
 monitor_agent = MonitorAgent()
-
-# Expose the agent for importing by other modules
-__all__ = ["monitor_agent", "MonitorAgent"]

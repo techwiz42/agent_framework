@@ -1,0 +1,20 @@
+import NextLink from 'next/link';
+import { cn } from '@/lib/utils';
+
+interface LinkProps extends React.ComponentProps<typeof NextLink> {
+  className?: string;
+}
+
+const Link = ({ className, ...props }: LinkProps) => {
+  return (
+    <NextLink 
+      className={cn(
+        "text-primary underline-offset-4 hover:underline",
+        className
+      )}
+      {...props}
+    />
+  );
+};
+
+export { Link };

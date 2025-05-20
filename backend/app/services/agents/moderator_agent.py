@@ -1,41 +1,34 @@
 from typing import Dict, List, Optional, Any, Union
 import logging
 import json
+import os
 import inspect
 import traceback
 
+from agents import (
+    Agent, 
+    function_tool, 
+    RunContextWrapper,
+    GuardrailFunctionOutput,
+    input_guardrail,
+    output_guardrail,
+    handoff,
+    ModelSettings,
+    AgentHooks
+)
+
+from openai import AsyncOpenAI
 from app.core.config import settings
-from app.services.agents.base_agent import BaseAgent, AgentHooks, RunContextWrapper
+from app.services.agents.base_agent import BaseAgent
 from app.services.agents.common_context import CommonAgentContext
+from app.services.agents.agent_interface import agent_interface
 
 logger = logging.getLogger(__name__)
 
-# Placeholder for function_tool decorator
-def function_tool(func):
-    return func
-
-# Placeholder for input_guardrail decorator
-def input_guardrail(func):
-    return func
-
-# Placeholder for output_guardrail decorator
-def output_guardrail(func):
-    return func
-
-# Placeholder for handoff decorator
-def handoff(agent, tool_name_override=None, tool_description_override=None):
-    return None
-
-class GuardrailFunctionOutput:
-    def __init__(self, output_info: str, tripwire_triggered: bool = False):
-        self.output_info = output_info
-        self.tripwire_triggered = tripwire_triggered
-
 # Utility function to get OpenAI client
-async def get_openai_client():
-    """Get an OpenAI client with the app's API key."""
-    # This is a placeholder - in a real implementation, import and return the actual client
-    return None
+def get_openai_client() -> AsyncOpenAI:
+    """Get an AsyncOpenAI client with the app's API key."""
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 @function_tool
 async def select_agent(
@@ -52,6 +45,13 @@ async def select_agent(
     Returns:
         JSON string with selected agent(s)
     """
+    # Get client for selection
+    client = get_openai_client()
+    
+    # Default query if None
+    if query is None:
+        query = "Unspecified query"
+    
     # Get context from current execution
     context = None
     try:
@@ -96,71 +96,148 @@ async def select_agent(
         }
         return json.dumps(result)
     
-    # Simplified approach for now: Use keyword matching for basic agent selection
-    if query:
-        query_lower = query.lower()
-        
-        # Define keywords for each agent type
-        agent_keywords = {
-            "BUSINESS": ["business", "strategy", "market", "profit", "revenue", "company", "management"],
-            "BUSINESSINTELLIGENCE": ["intelligence", "data", "metrics", "kpi", "analytics", "insights", "dashboard"],
-            "DATAANALYSIS": ["data", "analysis", "analyze", "dataset", "statistics", "graph", "chart", "trend"],
-            "WEBSEARCH": ["search", "internet", "web", "find", "google", "online", "lookup"],
-            "DOCUMENTSEARCH": ["document", "file", "pdf", "doc", "paper", "text", "upload"],
-            "MONITOR": ["monitor", "system", "status", "health", "track", "log", "performance"]
-        }
-        
-        # Score each agent based on keyword matches
-        agent_scores = {agent: 0 for agent in agent_options}
-        for agent in agent_options:
-            if agent in agent_keywords:
-                for keyword in agent_keywords[agent]:
-                    if keyword in query_lower:
-                        agent_scores[agent] += 1
-        
-        # Find the agent with the highest score
-        max_score = 0
-        primary_agent = "MODERATOR"  # Default
-        for agent, score in agent_scores.items():
-            if score > max_score:
-                max_score = score
-                primary_agent = agent
-        
-        # If no clear winner, use MODERATOR as default
-        if max_score == 0:
-            primary_agent = "MODERATOR"
+    # First attempt a simple keyword-based matching approach to avoid LLM call if possible
+    # This helps prevent loops and timeouts
+    query_keywords = query.lower().split()
+    
+    # Check for direct agent mentions in query
+    for agent in agent_options:
+        # Skip MODERATOR for direct keyword matching
+        if agent == "MODERATOR":
+            continue
             
+        # Convert agent name to keywords (e.g., DATA_AGENT -> ["data", "agent"])
+        agent_keywords = agent.lower().replace('_', ' ').split()
+        
+        # Check for significant keyword matches
+        if any(keyword in query_keywords for keyword in agent_keywords if len(keyword) > 2):
+            logger.info(f"Direct keyword match for agent: {agent}")
+            
+            # Create result with minimal supporting agents
+            result = {
+                "primary_agent": agent,
+                "supporting_agents": []
+            }
+            
+            # Store in context
+            try:
+                if context is not None and hasattr(context, 'context'):
+                    context.context.selected_agent = agent
+                    context.context.collaborators = []
+                    if hasattr(context.context, 'is_agent_selection'):
+                        context.context.is_agent_selection = True
+            except (AttributeError, TypeError) as e:
+                logger.warning(f"Could not update context with direct match: {e}")
+                
+            return json.dumps(result)
+    
+    # Get agent descriptions if available
+    agent_descriptions = {}
+    try:
+        if context is not None and hasattr(context, 'context') and hasattr(context.context, 'available_agents'):
+            agent_descriptions = context.context.available_agents
+    except (AttributeError, TypeError) as e:
+        logger.warning(f"Could not access context.available_agents for descriptions: {e}")
+    
+    if not agent_descriptions:
+        # Use agent names if descriptions unavailable
+        agent_descriptions = {agent: f"{agent} agent" for agent in agent_options}
+    
+    # Create a selection prompt for the LLM - with strict instructions to prevent overthinking
+    selection_prompt = f"""
+You must select ONE primary agent to handle this user query. Be decisive - no overthinking.
+
+USER QUERY: {query}
+
+AVAILABLE AGENTS:
+{chr(10).join([f"- {name}: {agent_descriptions.get(name, name)}" for name in agent_options])}
+
+INSTRUCTIONS:
+1. Quickly analyze what expertise is needed for this query
+2. Select exactly ONE primary agent from the list above
+3. Optionally select 1-2 supporting agents only if absolutely necessary
+4. Do not overthink - make a direct selection based on agent descriptions
+
+Respond with a JSON object that includes:
+{{
+  "primary_agent": "AGENT1",
+  "supporting_agents": ["AGENT2", "AGENT3"]
+}}
+
+Use EXACTLY the agent names as they appear in the AVAILABLE AGENTS list.
+"""
+    
+    try:
+        # Set a low temperature to encourage deterministic results and prevent overthinking
+        response = await client.chat.completions.create(
+            model=settings.DEFAULT_AGENT_MODEL,
+            messages=[{"role": "user", "content": selection_prompt}],
+            temperature=0.1,  # Lower temperature for more deterministic selection
+            response_format={"type": "json_object"},
+            max_tokens=300  # Limit response size to prevent overthinking
+        )
+        
+        selection_result = json.loads(response.choices[0].message.content)
+        
+        # Validate primary agent is in available agents
+        primary_agent = selection_result.get("primary_agent", "")
+        if primary_agent not in agent_options:
+            # Try to find a match
+            for agent_name in agent_options:
+                if agent_name.upper() == primary_agent.upper():
+                    selection_result["primary_agent"] = agent_name
+                    break
+            else:
+                # If still no match, use fallback
+                fallback = "MODERATOR" if "MODERATOR" in agent_options else agent_options[0]
+                logger.warning(f"Primary agent '{primary_agent}' not in available agents, using {fallback}")
+                selection_result["primary_agent"] = fallback
+        
+        # Validate supporting agents (limit to max 2)
+        valid_supporting = []
+        for agent in selection_result.get("supporting_agents", [])[:2]:  # Only process first 2
+            if agent in agent_options and agent != selection_result["primary_agent"]:
+                valid_supporting.append(agent)
+            else:
+                # Try to find a match
+                for agent_name in agent_options:
+                    if agent_name.upper() == agent.upper() and agent_name != selection_result["primary_agent"]:
+                        valid_supporting.append(agent_name)
+                        break
+        
+        selection_result["supporting_agents"] = valid_supporting  # Already limited to 2
+        
         # Store in context
         try:
             if context is not None and hasattr(context, 'context'):
-                context.context.selected_agent = primary_agent
-                context.context.collaborators = []
+                context.context.selected_agent = selection_result["primary_agent"]
+                context.context.collaborators = valid_supporting
                 if hasattr(context.context, 'is_agent_selection'):
                     context.context.is_agent_selection = True
         except (AttributeError, TypeError) as e:
-            logger.warning(f"Could not update context with direct match: {e}")
-            
+            logger.warning(f"Could not update context with selection results: {e}")
+        
+        return json.dumps(selection_result)
+        
+    except Exception as e:
+        logger.error(f"Error in agent selection: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Default to MODERATOR if available, otherwise first agent
+        fallback = "MODERATOR" if "MODERATOR" in agent_options else agent_options[0]
+        
+        # Update context with fallback
+        try:
+            if context is not None and hasattr(context, 'context'):
+                context.context.selected_agent = fallback
+        except (AttributeError, TypeError) as e:
+            logger.warning(f"Could not set selected_agent on context: {e}")
+        
         result = {
-            "primary_agent": primary_agent,
+            "primary_agent": fallback,
             "supporting_agents": []
         }
         return json.dumps(result)
-    
-    # Fallback to MODERATOR if no query or no match
-    result = {
-        "primary_agent": "MODERATOR",
-        "supporting_agents": []
-    }
-    
-    # Store in context
-    try:
-        if context is not None and hasattr(context, 'context'):
-            context.context.selected_agent = "MODERATOR"
-            context.context.collaborators = []
-    except (AttributeError, TypeError) as e:
-        logger.warning(f"Could not set selected_agent on context: {e}")
-    
-    return json.dumps(result)
 
 @function_tool
 async def check_collaboration_need(
@@ -179,16 +256,21 @@ async def check_collaboration_need(
     Returns:
         JSON string containing collaboration details
     """
-    # This is a simplified implementation that always returns no collaboration needed
-    result = {
-        "collaboration_needed": False,
-        "collaborators": [],
-        "reasoning": "Simplified implementation defaults to no collaboration"
-    }
+    # Get client for selection
+    client = get_openai_client()
+    
+    # Default values if None
+    if query is None:
+        query = "Unspecified query"
+    if primary_agent is None:
+        primary_agent = "MODERATOR"
     
     # Get context from current execution
     context = None
     try:
+        # This is a hack to get access to the current context
+        # The function tool decorator will pass the context as the first argument
+        # but we're not declaring it in the function signature to avoid schema issues
         frame = inspect.currentframe()
         args, _, _, values = inspect.getargvalues(frame)
         if len(args) > 0 and args[0] == 'context':
@@ -196,19 +278,144 @@ async def check_collaboration_need(
     except Exception as e:
         logger.warning(f"Could not access context: {e}")
     
-    # Store in context
+    # Parse available agents
+    agent_options = []
+    if available_agents:
+        agent_options = [a.strip() for a in available_agents.split(',')]
+    
+    # Get available agents from context if available
     try:
         if context is not None and hasattr(context, 'context'):
-            context.context.collaborators = []
+            ctx = context.context  # This is the CommonAgentContext
+            if hasattr(ctx, 'available_agents') and ctx.available_agents:
+                agent_options = list(ctx.available_agents.keys())
     except (AttributeError, TypeError) as e:
-        logger.warning(f"Could not set collaborators on context: {e}")
+        logger.warning(f"Could not access context.available_agents: {e}")
     
-    return json.dumps(result)
+    # Remove primary agent from options
+    agent_options = [a for a in agent_options if a != primary_agent]
+    
+    # If no other agents available, collaboration is not possible
+    if not agent_options:
+        result = {
+            "collaboration_needed": False,
+            "collaborators": []
+        }
+        
+        # Store result in context
+        try:
+            if context is not None and hasattr(context, 'context'):
+                context.context.collaborators = []
+        except (AttributeError, TypeError) as e:
+            logger.warning(f"Could not set collaborators on context: {e}")
+                
+        return json.dumps(result)
+    
+    # Get agent descriptions if available
+    agent_descriptions = {}
+    try:
+        if context is not None and hasattr(context, 'context') and hasattr(context.context, 'available_agents'):
+            agent_descriptions = context.context.available_agents
+    except (AttributeError, TypeError) as e:
+        logger.warning(f"Could not access context.available_agents for descriptions: {e}")
+    
+    if not agent_descriptions:
+        # Use agent names if descriptions unavailable
+        agent_descriptions = {agent: f"{agent} agent" for agent in agent_options}
+    
+    # Create a collaboration evaluation prompt for the LLM
+    collaboration_prompt = f"""
+Analyze this query to determine if multiple agents should collaborate on the response.
+
+USER QUERY: {query}
+
+PRIMARY AGENT: {primary_agent} ({agent_descriptions.get(primary_agent, "primary agent")})
+
+POTENTIAL COLLABORATORS:
+{chr(10).join([f"- {name}: {agent_descriptions.get(name, name)}" for name in agent_options])}
+
+INSTRUCTIONS:
+1. Analyze if this query would benefit from multiple perspectives or expertise areas
+2. Determine if the primary agent alone can handle this query adequately
+3. Select up to 2 additional agents who would add valuable perspective to the response
+
+Respond with a JSON object in this format:
+{{
+  "collaboration_needed": true/false,
+  "collaborators": ["AGENT1", "AGENT2"],
+  "reasoning": "brief explanation"
+}}
+"""
+    
+    try:
+        response = await client.chat.completions.create(
+            model=settings.DEFAULT_AGENT_MODEL,
+            messages=[{"role": "user", "content": collaboration_prompt}],
+            temperature=0.2,  # Slightly higher temperature for more consideration
+            response_format={"type": "json_object"}  # Ensure JSON response
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        
+        # Validate collaborators are in available agents
+        if "collaborators" in result:
+            valid_collaborators = []
+            for collab in result["collaborators"]:
+                collab_normalized = collab.strip().upper()
+                
+                # Check for exact match
+                if collab in agent_options:
+                    valid_collaborators.append(collab)
+                    continue
+                    
+                # Try flexible matching
+                for agent_name in agent_options:
+                    if agent_name.upper() == collab_normalized:
+                        valid_collaborators.append(agent_name)
+                        break
+                        
+                    # Try substring matching as last resort
+                    elif agent_name.upper() in collab_normalized or collab_normalized in agent_name.upper():
+                        valid_collaborators.append(agent_name)
+                        break
+            
+            # Update with validated collaborators
+            result["collaborators"] = valid_collaborators
+            result["collaboration_needed"] = result.get("collaboration_needed", False) and len(valid_collaborators) > 0
+        
+        # Store in context
+        try:
+            if context is not None and hasattr(context, 'context'):
+                context.context.collaborators = result.get("collaborators", [])
+        except (AttributeError, TypeError) as e:
+            logger.warning(f"Could not set collaborators on context: {e}")
+        
+        # Return JSON string
+        return json.dumps(result)
+        
+    except Exception as e:
+        logger.error(f"Error checking collaboration need: {e}")
+        
+        # Default to no collaboration on error
+        result = {
+            "collaboration_needed": False,
+            "collaborators": [],
+            "reasoning": "Error evaluating collaboration need"
+        }
+        
+        # Store in context
+        try:
+            if context is not None and hasattr(context, 'context'):
+                context.context.collaborators = []
+        except (AttributeError, TypeError) as e:
+            logger.warning(f"Could not set collaborators on context: {e}")
+        
+        return json.dumps(result)
 
 @input_guardrail
 def validate_moderator_input(
     context: RunContextWrapper[CommonAgentContext],
-    agent: Any,
+    agent: Agent,
     input: Union[str, List, Dict, Any]
 ) -> GuardrailFunctionOutput:
     """Basic validation for moderator input."""
@@ -275,8 +482,8 @@ class ModeratorAgentHooks(AgentHooks):
     async def on_handoff(
         self, 
         context: RunContextWrapper[CommonAgentContext],
-        agent: Any,
-        source: Any
+        agent: Agent,
+        source: Agent
     ) -> None:
         """Called when control is handed back to the moderator."""
         logger.info(f"Control returned to moderator from {source.name}")
@@ -339,7 +546,7 @@ ALWAYS SELECT AGENTS EXACTLY AS THEY APPEAR IN THE AVAILABLE AGENTS LIST.""",
         # Initialize the registered agents dictionary
         self._registered_agents = {}
 
-    def register_agent(self, agent: Any) -> None:
+    def register_agent(self, agent: Agent) -> None:
         """Register an agent with the moderator for handoffs."""
         if agent.name == self.name:
             logger.warning(f"Skipping self-registration for {self.name}")
@@ -351,13 +558,54 @@ ALWAYS SELECT AGENTS EXACTLY AS THEY APPEAR IN THE AVAILABLE AGENTS LIST.""",
             # Convert name to uppercase for storage, but lowercase and sanitize for tool name
             agent_type = agent.name.replace('Agent', '').upper()
 
-        # Store the agent description if available
-        if hasattr(agent, 'description') and agent.description:
-            self._registered_agents[agent_type] = agent.description
-        else:
-            self._registered_agents[agent_type] = f"{agent_type} agent"
+        # Create a valid tool name - must match pattern ^[a-zA-Z0-9_-]+$
+        # Replace any invalid characters with underscores
+        valid_tool_name = f"transfer_to_"
 
-        logger.info(f"Registered agent {agent_type} with moderator")
+        # Add the agent type to the tool name, ensuring it only contains valid characters
+        for char in agent_type.lower():
+            if char.isalnum() or char == '_' or char == '-':
+                valid_tool_name += char
+            else:
+                valid_tool_name += '_'
+
+        # Create a handoff to the agent if it's not already in the handoffs
+        try:
+            new_handoff = handoff(
+                agent,
+                tool_name_override=valid_tool_name,
+                tool_description_override=f"Transfer to {agent_type} specialist for this query"
+            )
+
+            # Check if this handoff already exists to avoid duplicates
+            existing_handoff_names = []
+            for existing_handoff in self.handoffs:
+                if hasattr(existing_handoff, 'tool_name'):
+                    existing_handoff_names.append(existing_handoff.tool_name)
+                elif hasattr(existing_handoff, 'agent_name'):
+                    # Generate the name we would create for this agent
+                    agent_name = existing_handoff.agent_name.replace('Agent', '').upper()
+                    sanitized_name = ''.join(c if c.isalnum() or c in '_-' else '_' for c in agent_name.lower())
+                    existing_handoff_names.append(f"transfer_to_{sanitized_name}")
+
+            # Only add if not already present
+            if valid_tool_name not in existing_handoff_names:
+                self.handoffs.append(new_handoff)
+                logger.info(f"Added handoff {valid_tool_name} for agent {agent_type}")
+            else:
+                logger.info(f"Handoff {valid_tool_name} already exists, skipping")
+
+            # Store the agent description if available
+            if hasattr(agent, 'description') and agent.description:
+                self._registered_agents[agent_type] = agent.description
+            else:
+                self._registered_agents[agent_type] = f"{agent_type} agent"
+
+            logger.info(f"Registered agent {agent_type} with moderator")
+
+        except Exception as e:
+            logger.error(f"Error creating handoff for agent {agent_type}: {e}")
+            logger.error(traceback.format_exc())
 
     def update_instructions(self, agent_descriptions: Dict[str, str]) -> None:
         """Update moderator instructions with available agents."""
@@ -384,6 +632,10 @@ ALWAYS SELECT AGENTS EXACTLY AS THEY APPEAR IN THE AVAILABLE AGENTS LIST.""",
         self.instructions = new_instructions
     
         logger.info(f"Updated MODERATOR instructions with {len(agent_descriptions_text)} agent descriptions")
+    
+    def get_async_openai_client(self) -> AsyncOpenAI:
+        """Get an AsyncOpenAI client with the app's API key."""
+        return get_openai_client()
 
 # Create the moderator agent instance
 moderator_agent = ModeratorAgent()

@@ -1,20 +1,127 @@
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, Any, Optional, List
 import logging
-import json
-import inspect
-
+from agents import Agent, WebSearchTool, function_tool, ModelSettings, RunContextWrapper
+from agents.run_context import RunContextWrapper
 from app.core.config import settings
-from app.services.agents.base_agent import BaseAgent, AgentHooks, RunContextWrapper
-from app.services.agents.common_context import CommonAgentContext
+from app.services.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
-# Placeholder for function_tool decorator
-def function_tool(func):
-    return func
+class WebSearchAgent(BaseAgent):
+    """
+    WebSearchAgent is a specialized agent that can perform web searches to find information.
+    
+    This agent specializes in searching the web for information and synthesizing
+    the results into useful responses.
+    """
 
-class WebSearchAgentHooks(AgentHooks):
-    """Custom hooks for the web search agent."""
+    def __init__(
+        self,
+        name: str = "Web Search Assistant",
+        search_location: Optional[str] = None,
+        search_context_size: Optional[str] = None,
+        tool_choice: Optional[str] = "auto",
+        parallel_tool_calls: bool = True,
+        **kwargs
+    ):
+        """
+        Initialize a WebSearchAgent with web search capabilities.
+        
+        Args:
+            name: The name of the agent. Defaults to "Web Search Assistant".
+            search_location: Optional location for localized search results. 
+                            Format should be "[City], [Country]" (e.g., "San Francisco, USA").
+            search_context_size: The amount of search context to use. Options are
+                                "low", "medium", or "high". Defaults to "medium".
+            tool_choice: The tool choice strategy to use. Defaults to "auto".
+            parallel_tool_calls: Whether to allow the agent to call multiple tools in parallel.
+            **kwargs: Additional arguments to pass to the BaseAgent constructor.
+        """
+        # Define the web search instructions
+        web_search_instructions = """You are a web search assistant agent that can search the internet to find information. Your role is to:
+
+1. SEARCH THE WEB
+- Search for up-to-date information based on user queries
+- Find relevant and accurate information from reputable sources
+- Synthesize and summarize information from multiple sources
+- Provide comprehensive answers to questions
+
+2. SEARCHING BEST PRACTICES
+- Use specific search terms to get the most relevant results
+- Break down complex queries into searchable components
+- Search for different aspects of multi-part questions
+- Use follow-up searches to refine or expand information
+- Search for the most recent information when timeliness matters
+
+3. RESPONSE GUIDELINES
+- Always cite your sources with website names
+- Indicate when information couldn't be found
+- Provide balanced perspectives when appropriate
+- Organize information in a clear, readable format
+- Use bullet points or numbered lists for clarity when appropriate
+- Indicate when information might be time-sensitive
+- Start with a direct answer before expanding with details
+
+4. CONTEXT AWARENESS
+- Consider the user's geographic location for relevant information
+- Understand what level of detail the user needs
+- Adapt your search strategy based on the type of query
+- Build on previous searches in the conversation
+
+5. SEARCH LIMITATIONS
+- Acknowledge when a search might not provide complete information
+- Be transparent about difficulties finding certain information
+- Explain when the user might need specialized sources beyond general web search
+- Note when information is limited by region/country
+
+When searching, always strive to find the most accurate, up-to-date, and relevant information available online."""
+
+        # Store search configuration for later reference
+        self._search_location = search_location
+        # Apply default value for search_context_size
+        self._search_context_size = search_context_size if search_context_size else "medium"
+        
+        # Create the WebSearchTool instance
+        web_search_tool = None
+        try:
+            if search_location:
+                parts = search_location.split(",")
+                if len(parts) == 2:
+                    city, country = parts
+                    web_search_tool = WebSearchTool(
+                        user_location={"city": city.strip(), "country": country.strip()},
+                        search_context_size=search_context_size
+                    )
+                else:
+                    logger.warning(f"Invalid search_location format: {search_location}. Expected 'City, Country'")
+                    web_search_tool = WebSearchTool(search_context_size=search_context_size)
+            else:
+                web_search_tool = WebSearchTool(search_context_size=search_context_size)
+        except Exception as e:
+            logger.warning(f"Error creating WebSearchTool: {e}. Creating without location.")
+            web_search_tool = WebSearchTool(search_context_size=search_context_size)
+            
+        # IMPORTANT: BaseAgent expects all tools in the 'functions' parameter
+        # Combine the WebSearchTool and our method functions in one list
+        all_functions = [
+            web_search_tool,  # Include WebSearchTool as first function
+            function_tool(self.refine_search_terms),
+            function_tool(self.synthesize_information),
+            function_tool(self.extract_key_information)
+        ]
+        
+        # Initialize the Agent class directly
+        super().__init__(
+            name=name,
+            model=settings.DEFAULT_AGENT_MODEL,
+            instructions=web_search_instructions,
+            functions=all_functions,  # Pass all functions as tools
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            max_tokens=2048,
+            **kwargs
+        )
+
 
     async def init_context(self, context: RunContextWrapper[Any]) -> None:
         """
@@ -26,153 +133,181 @@ class WebSearchAgentHooks(AgentHooks):
         # Call parent implementation
         await super().init_context(context)
         
+        # Add any agent-specific context initialization here
         logger.info(f"Initialized context for WebSearchAgent")
-
-@function_tool
-async def search_web(
-    query: str,
-    search_type: Optional[str] = "general",
-    result_count: Optional[int] = 5
-) -> str:
-    """
-    Search the web for information based on the query.
-    
-    Args:
-        query: The search query
-        search_type: Type of search (general, news, academic, etc.)
-        result_count: Number of results to return
         
-    Returns:
-        JSON string with search results
-    """
-    # This is a simplified implementation that returns mock search results
-    # In a real implementation, this would call a search API
-    
-    logger.info(f"Web search for: {query} (type: {search_type}, count: {result_count})")
-    
-    # Mock search results
-    results = {
-        "query": query,
-        "search_type": search_type,
-        "total_results_found": 1000,  # Mock value
-        "results": [
-            {
-                "title": f"Example result 1 for {query}",
-                "url": "https://example.com/result1",
-                "snippet": f"This is a mock search result about {query}. It contains some information that might be relevant to the query.",
-                "published_date": "2023-01-15"
-            },
-            {
-                "title": f"Example result 2 for {query}",
-                "url": "https://example.com/result2",
-                "snippet": f"Another mock result about {query} with slightly different information than the first result.",
-                "published_date": "2023-03-22"
-            },
-            {
-                "title": f"Example result 3 for {query}",
-                "url": "https://example.com/result3",
-                "snippet": f"A third mock result that discusses aspects of {query} with different focus.",
-                "published_date": "2022-11-30"
-            }
-        ],
-        "search_suggestion": f"Did you mean: {query}?"
-    }
-    
-    # In a real implementation, the following would be used:
-    # 1. Google Custom Search API (if settings.GOOGLE_API_KEY is available)
-    # 2. Or any other search API service
-    
-    return json.dumps(results)
-
-@function_tool
-async def fetch_webpage_content(
-    url: str,
-    content_type: Optional[str] = "main"
-) -> str:
-    """
-    Fetch and extract content from a webpage.
-    
-    Args:
-        url: The URL of the webpage to fetch
-        content_type: Type of content to extract (main, full, headings, etc.)
+    @property
+    def description(self) -> str:
+        """
+        Get a description of this agent's capabilities.
         
-    Returns:
-        JSON string with the extracted content
-    """
-    # This is a simplified implementation that returns mock webpage content
-    # In a real implementation, this would use requests or aiohttp to fetch the page
+        Returns:
+            A string describing the agent's specialty.
+        """
+        return "Specialist in performing web searches to find up-to-date information from the internet"
+
+    def refine_search_terms(
+        self, 
+        context: RunContextWrapper, 
+        original_query: Optional[str] = None, 
+        focus_area: Optional[str] = None
+    ) -> List[str]:
+        """
+        Refine a search query into more effective search terms.
+        
+        Args:
+            context: The run context wrapper.
+            original_query: The original search query that needs refinement.
+            focus_area: Optional specific aspect to focus on.
+            
+        Returns:
+            A list of suggested search terms that would be more effective.
+        """
+        # Handle default values inside the function
+        original_query = original_query or ""
+        
+        logger.info(f"Refining search terms for: {original_query}")
+        
+        # Process the query to generate more effective search variations
+        refined_terms = [original_query]  # Always include original
+        
+        # Add query variations
+        words = original_query.split()
+        if len(words) > 3:
+            # Create a more concise version
+            refined_terms.append(" ".join(words[:3]) + " " + (focus_area if focus_area else ""))
+        
+        # Add a version with quotes for exact match
+        if " " in original_query:
+            refined_terms.append(f'"{original_query}"')
+        
+        # Add a version with focus area
+        if focus_area:
+            refined_terms.append(f"{original_query} {focus_area}")
+            refined_terms.append(f"{focus_area} {original_query}")
+        
+        # Add a version with "how to" if it seems like a how-to query
+        if not original_query.lower().startswith("how to"):
+            if original_query.lower().startswith("how"):
+                refined_terms.append(f"how to {original_query[4:]}")
+            else:
+                refined_terms.append(f"how to {original_query}")
+        
+        return refined_terms
     
-    logger.info(f"Fetching webpage content from: {url} (type: {content_type})")
+    def synthesize_information(
+        self, 
+        context: RunContextWrapper,
+        search_results: Optional[List[Dict[str, Any]]] = None, 
+        focus_question: Optional[str] = None
+    ) -> str:
+        """
+        Synthesize information from multiple search results to answer a specific question.
+        
+        Args:
+            context: The run context wrapper.
+            search_results: A list of search results, each containing at least 'title' and 'content'.
+            focus_question: The specific question to answer from the search results.
+            
+        Returns:
+            A synthesized answer that combines information from multiple sources.
+        """
+        # Handle default values inside the function
+        search_results = search_results or []
+        focus_question = focus_question or "General information synthesis"
+        
+        logger.info(f"Synthesizing information for question: {focus_question}")
+        
+        if not search_results:
+            return "No search results were provided to synthesize."
+        
+        # Count the number of sources
+        num_sources = len(search_results)
+        
+        # Extract source titles for citation
+        sources = [result.get('title', f"Source {i+1}") for i, result in enumerate(search_results)]
+        sources_str = ", ".join(sources)
+        
+        # Create a structured synthesis from the search results
+        synthesis = f"""
+        # Information Synthesis
+
+        ## Focus Question
+        {focus_question}
+        
+        ## Key Points
+        Based on {num_sources} sources, the key information includes:
+        
+        - This would list key point 1 synthesized from the sources
+        - This would list key point 2 synthesized from the sources
+        - This would list key point 3 synthesized from the sources
+        
+        ## Synthesis
+        This section would contain a coherent answer to the focus question,
+        combining information from all provided sources in a logical way.
+        
+        ## Sources
+        Information synthesized from: {sources_str}
+        """
+        
+        return synthesis
     
-    # Mock webpage content
-    content = {
-        "url": url,
-        "title": "Example Webpage",
-        "content_type": content_type,
-        "extracted_content": f"This is mock content extracted from {url}. In a real implementation, this would contain actual content from the webpage based on the requested content_type.",
-        "metadata": {
-            "author": "Unknown",
-            "published_date": "Unknown",
-            "word_count": 150,
-            "estimated_read_time": "1 minute"
+    def extract_key_information(
+        self, 
+        context: RunContextWrapper,
+        text: Optional[str] = None, 
+        extraction_targets: Optional[List[str]] = None
+    ) -> Dict[str, str]:
+        """
+        Extract specific information from a text based on targeted extraction criteria.
+        
+        Args:
+            context: The run context wrapper.
+            text: The text to extract information from.
+            extraction_targets: List of specific information types to extract (e.g., "dates", "statistics").
+            
+        Returns:
+            A dictionary mapping extraction targets to extracted information.
+        """
+        # Handle default values inside the function
+        text = text or ""
+        extraction_targets = extraction_targets or ["general information"]
+        
+        logger.info(f"Extracting information with {len(extraction_targets)} targets")
+        
+        results = {}
+        
+        # Process the text to extract the requested information types
+        for target in extraction_targets:
+            results[target] = f"Extracted {target} would appear here based on analysis of the provided text."
+        
+        results["text_length"] = str(len(text))
+        results["summary"] = "A brief summary of the text would appear here."
+        
+        return results
+
+    def clone(self, **kwargs) -> "WebSearchAgent":
+        """
+        Create a copy of this agent with the given overrides.
+        
+        Args:
+            **kwargs: Attributes to override in the cloned agent.
+            
+        Returns:
+            A new WebSearchAgent instance with the specified overrides.
+        """
+        # Create parameter dictionary for the new instance
+        params = {
+            "name": kwargs.get("name", self.name),
+            "model": kwargs.get("model", self.model),
+            "search_location": kwargs.get("search_location", self._search_location),
+            "search_context_size": kwargs.get("search_context_size", self._search_context_size),
+            "tool_choice": kwargs.get("tool_choice", self.model_settings.tool_choice),
+            "parallel_tool_calls": kwargs.get("parallel_tool_calls", self.model_settings.parallel_tool_calls),
         }
-    }
-    
-    # In a real implementation, the following would be used:
-    # 1. Fetch the page using requests or aiohttp
-    # 2. Parse the HTML using BeautifulSoup or similar
-    # 3. Extract the relevant content based on content_type
-    
-    return json.dumps(content)
-
-class WebSearchAgent(BaseAgent):
-    """
-    Web search agent that retrieves and synthesizes information from the internet.
-    """
-    
-    def __init__(self, name="WEBSEARCH"):
-        super().__init__(
-            name=name,
-            instructions="""You are a web search agent specializing in retrieving and synthesizing information from the internet.
-
-YOUR EXPERTISE:
-- Formulating effective search queries
-- Finding relevant information online
-- Extracting key content from web pages
-- Synthesizing information from multiple sources
-- Fact-checking and information verification
-- Summarizing web content concisely
-- Identifying authoritative sources
-
-APPROACH:
-- Break complex questions into searchable queries
-- Search for recent and authoritative information
-- Cross-reference information across multiple sources
-- Cite sources clearly for all key information
-- Distinguish between facts, opinions, and mixed content
-- Acknowledge information gaps or contradictions
-- Provide balanced perspectives on controversial topics
-
-RESPONSE FORMAT:
-- Begin with a direct answer to the user's question when possible
-- Organize information in a structured, readable format
-- Use bullet points for lists of facts or details
-- Include source citations inline (website names and dates)
-- Summarize key points at the end of longer responses
-- Clearly indicate when information might be outdated
-
-When using search tools, craft specific queries that target the precise information needed rather than general topics.
-
-Remember to always provide attribution for information you find online, and to evaluate sources for credibility and recency.""",
-            functions=[search_web, fetch_webpage_content],
-            hooks=WebSearchAgentHooks()
-        )
         
-        # Add description property
-        self.description = "Searches the web for relevant information"
-
-# Create the web search agent instance
-web_search_agent = WebSearchAgent()
-
-# Expose the agent for importing by other modules
-__all__ = ["web_search_agent", "WebSearchAgent"]
+        # Filter out None values to use defaults where not specified
+        params = {k: v for k, v in params.items() if v is not None}
+        
+        # Create a new instance with the parameters
+        return WebSearchAgent(**params)

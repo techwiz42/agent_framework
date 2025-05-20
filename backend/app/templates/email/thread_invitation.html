@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #22c55e;
+	    color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 20px 0;
+	    font: bold;
+        }
+        .footer { margin-top: 30px; font-size: 0.9em; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>You're Invited to Join a Conversation</h2>
+        <p>Hello!</p>
+        <p>{{ owner_name }} has invited you to join a conversation on Cyberiad:</p>
+        
+        <h3>{{ thread_title }}</h3>
+        <p>{{ thread_description }}</p>
+
+        <a href="{{ invitation_link }}" class="button">Join Conversation</a>
+
+        <p>This invitation link will expire in 7 days.</p>
+
+        <div class="footer">
+            <p>If you didn't expect this invitation, you can safely ignore this email.</p>
+            <p>© {{ year }} Cyberiad. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

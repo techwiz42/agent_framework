@@ -4,12 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.core.security import create_password_reset_token, verify_password_reset_token
 from app.db.session import db_manager
-from app.core.security import (
-                               auth_manager,
-                               create_email_verification_token,
-                               verify_email_token
-                            )
+from app.core.security import auth_manager
 from app.schemas.domain.schemas import Token, UserAuth, RegistrationResponse
+from app.services.notifications import NotificationService
 from pydantic import BaseModel, Field
 import traceback
 
@@ -24,20 +21,13 @@ async def login(
 ):
     logger.info(f"Login attempt for username: {form_data.username}")
     
+    # Try to authenticate by email instead of username
     user = await auth_manager.authenticate_user(db, form_data.username, form_data.password)
     if not user:
-        logger.warning(f"Authentication failed for username: {form_data.username}")
+        logger.warning(f"Authentication failed for username/email: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password"
-        )
-    
-    # Verify email verification
-    if not user.email_verified:
-        logger.warning(f"Unverified email for username: {form_data.username}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Please verify your email address before logging in"
+            detail="Incorrect email or password"
         )
         
     access_token = auth_manager.create_access_token(
@@ -45,7 +35,8 @@ async def login(
             "sub": user.username,
             "email": user.email,
             "user_id": str(user.id),
-            "role": str(user.role)  # Convert role to string
+            "role": str(user.role),  # Convert role to string
+            "phone": user.phone
         },
     )
 
@@ -57,6 +48,7 @@ async def login(
         user_id=str(user.id),
         username=user.username,
         email=user.email,
+        phone=user.phone,
         role=user.role
     )
 
@@ -64,10 +56,13 @@ async def login(
 async def register_user(
     request: Request,
     user_data: UserAuth,
-    db: AsyncSession = Depends(db_manager.get_session),
-    background_tasks: BackgroundTasks = BackgroundTasks()
+    db: AsyncSession = Depends(db_manager.get_session)
 ):
     try:
+        # Check if passwords match
+        if user_data.password != user_data.password_confirm:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+            
         # Check for existing username
         existing_user = await db_manager.get_user_by_username(db, user_data.username)
         if existing_user:
@@ -81,8 +76,6 @@ async def register_user(
                 "email": user_data.email
             }
         
-        # Create verification token
-        verification_token = create_email_verification_token({"email": user_data.email})
         hashed_password = auth_manager.get_password_hash(user_data.password)
         
         user = await db_manager.create_user(
@@ -90,19 +83,11 @@ async def register_user(
             user_data.username,
             user_data.email,
             hashed_password,
-            verification_token=verification_token
+            phone=user_data.phone
         )
         
-        # Create notification service and add to background tasks
-        # In a full implementation, you would have a notification service to send emails
-        # background_tasks.add_task(
-        #     notification_service.send_verification_email,
-        #     user_data.email,
-        #     verification_token
-        # )
-        
         return {
-            "message": "Registration pending. Please check your email to verify your account.",
+            "message": "Registration successful. You can now log in.",
             "email": user_data.email
         }
     except Exception as e:
@@ -110,31 +95,8 @@ async def register_user(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.get("/verify-email/{token}")
-async def verify_email(
-    token: str,
-    db: AsyncSession = Depends(db_manager.get_session)
-):
-    payload = verify_email_token(token)
-    if not payload:
-        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
-    
-    email = payload.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="Invalid token payload")
-    
-    user = await db_manager.get_user_by_email(db, email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    if user.email_verified:
-        return {"message": "Email already verified"}
-    
-    user.email_verified = True
-    user.email_verification_token = None
-    await db.commit()
-    
-    return {"message": "Email verified successfully"}
+# Email verification endpoint removed since we no longer need email verification
+# The endpoint at /api/auth/verify-email/{token} has been removed
 
 @router.post("/request-password-reset")
 async def request_password_reset(
@@ -154,13 +116,15 @@ async def request_password_reset(
         user = await db_manager.get_user_by_email(db, email)
         if user:
             reset_token = create_password_reset_token(email)
-            # In a full implementation, you would have a notification service
-            # background_tasks.add_task(
-            #     notification_service.send_password_reset_email,
-            #     email,
-            #     reset_token
-            # )
-            logger.info(f"Password reset email would be sent to {email}")
+            notification_service = NotificationService()
+            
+            # Add to background tasks
+            background_tasks.add_task(
+                notification_service.send_password_reset_email,
+                email,
+                reset_token
+            )
+            logger.info(f"Password reset email queued for {email}")
         else:
             logger.info(f"Password reset requested for non-existent email: {email}")
             
@@ -202,6 +166,8 @@ async def reset_password(
     user.hashed_password = hashed_password
     await db.commit()
     
+    # No need to invalidate tokens as we're not using Redis caching anymore
+    
     return {"message": "Password successfully reset"}
 
 @router.post("/logout")
@@ -213,7 +179,8 @@ async def logout(
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
-    # Since we're not using session storage, we can't invalidate the token server-side.
-    # Client will need to discard the token.
+    # Since we're not using Redis for token storage/blacklisting,
+    # we can't invalidate the token server-side. Client will need to
+    # discard the token.
     
     return {"message": "Successfully logged out"}

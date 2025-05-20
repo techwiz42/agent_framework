@@ -1,0 +1,32 @@
+<!-- public/icons/logo.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Frame -->
+  <rect width="32" height="32" rx="4" fill="#f0f0f0" stroke="#333" stroke-width="1.5"/>
+  
+  <!-- Robot head -->
+  <rect x="9" y="6" width="14" height="12" rx="2" fill="#555"/>
+  
+  <!-- Robot eyes -->
+  <circle cx="13" cy="11" r="2" fill="#3b82f6"/>
+  <circle cx="19" cy="11" r="2" fill="#3b82f6"/>
+  
+  <!-- Robot antenna -->
+  <line x1="16" y1="6" x2="16" y2="3" stroke="#555" stroke-width="1.5"/>
+  <circle cx="16" cy="2" r="1" fill="#f59e0b"/>
+  
+  <!-- Robot body -->
+  <rect x="10" y="18" width="12" height="8" rx="1" fill="#555"/>
+  
+  <!-- Robot buttons -->
+  <circle cx="13" cy="22" r="1" fill="#3b82f6"/>
+  <circle cx="16" cy="22" r="1" fill="#f59e0b"/>
+  <circle cx="19" cy="22" r="1" fill="#3b82f6"/>
+  
+  <!-- Robot arms -->
+  <line x1="10" y1="20" x2="6" y2="18" stroke="#555" stroke-width="1.5"/>
+  <line x1="22" y1="20" x2="26" y2="18" stroke="#555" stroke-width="1.5"/>
+  
+  <!-- Robot legs -->
+  <line x1="13" y1="26" x2="13" y2="29" stroke="#555" stroke-width="1.5"/>
+  <line x1="19" y1="26" x2="19" y2="29" stroke="#555" stroke-width="1.5"/>
+</svg>

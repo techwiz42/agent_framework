@@ -26,3 +26,4 @@ class ProgressManager:
                     pass
 
 progress_manager = ProgressManager()
+

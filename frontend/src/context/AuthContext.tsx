@@ -1,150 +1,203 @@
-'use client';
-
-import React, { createContext, useContext, useState, useEffect } from 'react';
+// src/context/AuthContext.tsx
+import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { api } from '@/services/api';
+import { authService, LoginCredentials, RegisterCredentials } from '@/services/auth';
+import { RegistrationResponse } from '@/types';
 
-// Define user type
-export interface User {
-  id: string;
-  email: string;
-  name?: string;
-  role: string;
-}
-
-// Define auth context value type
-interface AuthContextValue {
-  user: User | null;
+interface AuthState {
   token: string | null;
-  isLoading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name?: string) => Promise<void>;
-  logout: () => void;
-  getToken: () => string | null;
+  user: {
+    id: string;
+    username: string;
+    email: string;
+    phone?: string;
+    role: string;
+  } | null;
+  isInitialized: boolean;
+  isLoading: boolean;
+  error: string | null;
 }
 
-// Create context with default values
-const AuthContext = createContext<AuthContextValue>({
-  user: null,
-  token: null,
-  isLoading: true,
-  isAuthenticated: false,
-  login: async () => {},
-  register: async () => {},
-  logout: () => {},
-  getToken: () => null,
-});
+interface AuthContextValue extends AuthState {
+  login: (credentials: LoginCredentials) => Promise<void>;
+  register: (credentials: RegisterCredentials) => Promise<RegistrationResponse>;
+  logout: () => void;
+}
 
-// Auth provider component
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [authState, setAuthState] = useState<AuthState>({
+    token: null,
+    user: null,
+    isInitialized: false,
+    isLoading: true,
+    isAuthenticated: false,
+    error: null
+  });
   const router = useRouter();
 
-  // Check for existing user on mount
   useEffect(() => {
-    const checkAuth = async () => {
-      const storedToken = localStorage.getItem('auth_token');
-      
-      if (storedToken) {
-        try {
-          // Set token state
-          setToken(storedToken);
-          
-          // Verify token and get user info
-          const response = await api.get('/auth/me');
-          setUser(response.data);
-        } catch (error) {
-          console.error('Error verifying authentication:', error);
-          localStorage.removeItem('auth_token');
-          setToken(null);
+    const initializeAuth = async () => {
+      try {
+        const savedToken = authService.getToken();
+        if (savedToken) {
+          try {
+            const tokenData = JSON.parse(atob(savedToken.split('.')[1]));
+            setAuthState(prev => ({
+              ...prev,
+              token: savedToken,
+              user: {
+                id: tokenData.user_id,
+                username: tokenData.sub,
+                email: tokenData.email,
+                phone: tokenData.phone,
+                role: tokenData.role
+              },
+              isInitialized: true,
+              isLoading: false
+            }));
+          } catch (e) {
+            console.error('Failed to parse token:', e);
+            authService.removeToken();
+            setAuthState(prev => ({
+              ...prev,
+              isInitialized: true,
+              isLoading: false
+            }));
+          }
+        } else {
+          setAuthState(prev => ({
+            ...prev,
+            isInitialized: true,
+            isLoading: false
+          }));
         }
+      } catch (e) {
+        console.error('Auth initialization error:', e);
+        setAuthState(prev => ({
+          ...prev,
+          error: e instanceof Error ? e.message : 'Failed to initialize authentication',
+          isInitialized: true,
+          isLoading: false
+        }));
       }
-      
-      setIsLoading(false);
     };
-    
-    checkAuth();
+
+    initializeAuth();
   }, []);
 
-  // Login function
-  const login = async (email: string, password: string) => {
-    setIsLoading(true);
-    
+  useEffect(() => {
+    const checkTokenExpiration = () => {
+      const token = authService.getToken();
+      if (token) {
+        const decodedToken = JSON.parse(atob(token.split('.')[1]));
+        const currentTime = Date.now() / 1000;
+        if (decodedToken.exp < currentTime) {
+          logout();
+        }
+      }
+    };
+
+    // Check token expiration every minute
+    const intervalId = setInterval(checkTokenExpiration, 60 * 1000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  });
+
+  const login = async (credentials: LoginCredentials) => {
     try {
-      const response = await api.post('/auth/login', { email, password });
-      const { access_token, user } = response.data;
+      setAuthState(prev => ({ ...prev, isLoading: true, error: null }));
+      const response = await authService.login(credentials);
       
-      // Save token and user info
-      localStorage.setItem('auth_token', access_token);
-      setToken(access_token);
-      setUser(user);
+      const tokenData = JSON.parse(atob(response.access_token.split('.')[1]));
+      setAuthState({
+        token: response.access_token,
+        user: {
+          id: tokenData.user_id,
+          username: tokenData.sub,
+          email: tokenData.email,
+          phone: tokenData.phone,
+          role: tokenData.role
+        },
+        isAuthenticated: true,
+        isInitialized: true,
+        isLoading: false,
+        error: null
+      });
       
-      // Redirect to conversations page
       router.push('/conversations');
-    } catch (error) {
-      console.error('Login error:', error);
-      throw error;
-    } finally {
-      setIsLoading(false);
+    } catch (err) {
+      console.error('Login error:', err);
+      setAuthState(prev => ({
+        ...prev,
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Failed to login'
+      }));
+      throw err;
     }
   };
 
-  // Register function
-  const register = async (email: string, password: string, name?: string) => {
-    setIsLoading(true);
-    
+  const register = async (credentials: RegisterCredentials): Promise<RegistrationResponse> => {
     try {
-      const response = await api.post('/auth/register', { email, password, name });
-      const { access_token, user } = response.data;
-      
-      // Save token and user info
-      localStorage.setItem('auth_token', access_token);
-      setToken(access_token);
-      setUser(user);
-      
-      // Redirect to conversations page
-      router.push('/conversations');
-    } catch (error) {
-      console.error('Registration error:', error);
-      throw error;
-    } finally {
-      setIsLoading(false);
+      setAuthState(prev => ({ ...prev, isLoading: true, error: null }));
+      const response = await authService.register(credentials);
+      setAuthState(prev => ({ ...prev, isLoading: false }));
+      return response;
+    } catch (err) {
+      console.error('Registration error:', err);
+      setAuthState(prev => ({
+        ...prev,
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Failed to register'
+      }));
+      throw err;
     }
   };
 
-  // Logout function
   const logout = () => {
-    localStorage.removeItem('auth_token');
-    setToken(null);
-    setUser(null);
-    router.push('/');
+    authService.removeToken();
+    setAuthState({
+      token: null,
+      user: null,
+      isInitialized: true,
+      isLoading: false,
+      isAuthenticated: false,
+      error: null
+    });
+    router.push('/login');
   };
 
-  // Get token function
-  const getToken = () => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('auth_token');
-    }
-    return null;
-  };
+  // Don't render children until auth is initialized
+  if (!authState.isInitialized) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
+      </div>
+    );
+  }
 
-  // Context value
-  const value = {
-    user,
-    token,
-    isLoading,
-    isAuthenticated: !!user,
-    login,
-    register,
-    logout,
-    getToken,
-  };
+  return (
+    <AuthContext.Provider 
+      value={{ 
+        ...authState,
+        login, 
+        register, 
+        logout 
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-// Custom hook for using auth context
-export const useAuth = () => useContext(AuthContext);
+export function useAuth(): AuthContextValue {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+}

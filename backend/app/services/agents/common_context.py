@@ -4,7 +4,7 @@ from uuid import UUID
 class CommonAgentContext:
     """
     Shared context object for all agents.
-    Provides unified access to conversation state and metadata.
+    Extracted to a separate file to avoid circular imports.
     """
     
     def __init__(

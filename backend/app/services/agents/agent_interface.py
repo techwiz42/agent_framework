@@ -3,7 +3,7 @@ import logging
 import traceback
 from uuid import UUID
 
-from app.services.agents.base_agent import Agent, BaseAgent
+from agents import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,7 @@ class AgentInterface:
                 # Most agents can be used directly from the base template
                 # For agents that need conversation-specific state, implement 
                 # a proper clone/copy mechanism
-                if hasattr(base_agent, 'clone'):
-                    self.conversation_agents[thread_id][agent_type] = base_agent.clone()
-                else:
-                    self.conversation_agents[thread_id][agent_type] = base_agent
+                self.conversation_agents[thread_id][agent_type] = base_agent
                 
                 logger.info(f"Set up agent {agent_type} for conversation {thread_id}")
             except Exception as e:
@@ -111,11 +108,7 @@ class AgentInterface:
                 self.conversation_agents[thread_id] = {}
                 
             # Add the agent to this conversation
-            if hasattr(self.base_agents[agent_type], 'clone'):
-                self.conversation_agents[thread_id][agent_type] = self.base_agents[agent_type].clone()
-            else:
-                self.conversation_agents[thread_id][agent_type] = self.base_agents[agent_type]
-            
+            self.conversation_agents[thread_id][agent_type] = self.base_agents[agent_type]
             return self.conversation_agents[thread_id][agent_type]
         
         logger.warning(f"Agent {agent_type} not found for thread {thread_id}")

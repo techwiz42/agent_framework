@@ -1,168 +1,179 @@
-import axios from 'axios';
+import { ApiResponse } from '@/types';
 
-// Create axios instance with base URL from environment variable
-export const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+type ApiRequestOptions = RequestInit & {
+  params?: URLSearchParams | Record<string, string>;
+};
 
-// Request interceptor - add auth token to requests
-api.interceptors.request.use(
-  (config) => {
-    // Get token from localStorage (in browser context only)
-    if (typeof window !== 'undefined') {
-      const token = localStorage.getItem('auth_token');
-      if (token) {
-        config.headers['Authorization'] = `Bearer ${token}`;
-      }
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  }
-);
+async function fetchApi<T>(
+  endpoint: string,
+  options: ApiRequestOptions = {}
+): Promise<ApiResponse<T>> {
+  const cleanEndpoint = endpoint
+    .replace(/^\/+/, '')
+    .replace(/^api\//, '');
 
-// Response interceptor - handle token expiration
-api.interceptors.response.use(
-  (response) => {
-    return response;
-  },
-  async (error) => {
-    const originalRequest = error.config;
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://dev.agentframework.ai:8001';
+
+  // Construct URL with query parameters if they exist
+  const url = new URL(`${baseUrl}/api/${cleanEndpoint}`);
+  if (options.params) {
+    const params = options.params instanceof URLSearchParams 
+      ? options.params 
+      : new URLSearchParams(options.params);
     
-    // Handle 401 errors (unauthorized)
-    if (error.response && error.response.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true;
-      
-      // Redirect to login page
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('auth_token');
-        window.location.href = '/auth/login';
-      }
-      
-      return Promise.reject(error);
-    }
-    
-    return Promise.reject(error);
-  }
-);
-
-// Generic API functions
-
-// GET request
-export const get = async<T>(url: string, params?: any): Promise<T> => {
-  const response = await api.get<T>(url, { params });
-  return response.data;
-};
-
-// POST request
-export const post = async<T>(url: string, data?: any): Promise<T> => {
-  const response = await api.post<T>(url, data);
-  return response.data;
-};
-
-// PUT request
-export const put = async<T>(url: string, data?: any): Promise<T> => {
-  const response = await api.put<T>(url, data);
-  return response.data;
-};
-
-// DELETE request
-export const del = async<T>(url: string): Promise<T> => {
-  const response = await api.delete<T>(url);
-  return response.data;
-};
-
-// Upload file
-export const uploadFile = async<T>(url: string, file: File, additionalData?: Record<string, any>): Promise<T> => {
-  const formData = new FormData();
-  formData.append('file', file);
-  
-  if (additionalData) {
-    Object.entries(additionalData).forEach(([key, value]) => {
-      formData.append(key, value);
+    params.forEach((value, key) => {
+      url.searchParams.append(key, value);
     });
   }
-  
-  const response = await api.post<T>(url, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data',
-    },
-  });
-  
-  return response.data;
-};
 
-// Conversation-specific API calls
+  try {
+    const response = await fetch(url.toString(), {
+      ...options,
+      headers: {
+	...(!(options.body instanceof FormData) && { 'Content-Type': 'application/json' }),
+        ...options.headers,
+      },
+    });
 
-// Get all conversations for the current user
-export interface ConversationsResponse {
-  conversations: Conversation[];
+    // Handle 204 No Content
+    if (response.status === 204) {
+      return { data: null } as ApiResponse<T>;
+    }
+
+    const data = await response.json() as T | { detail: string };
+
+    if (!response.ok) {
+      throw new Error(
+        typeof data === 'object' && data !== null && 'detail' in data
+          ? (data as { detail: string }).detail
+          : (typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data)) ||
+       'An error occurred'
+    );
+  }
+
+    return { data: data as T };
+  } catch (err) {
+    console.error('Fetch Error:', err);
+    throw err;
+  }
 }
 
-export const getConversations = async (): Promise<ConversationsResponse> => {
-  return get<ConversationsResponse>('/conversations');
+export const api = {
+  get: <T>(endpoint: string, options: RequestInit & { params?: URLSearchParams | Record<string, string> } = {}) => {
+    const { params, ...fetchOptions } = options;
+    const queryParams = params instanceof URLSearchParams 
+      ? params 
+      : params 
+        ? new URLSearchParams(params) 
+        : undefined;
+
+    const url = queryParams 
+      ? `${endpoint}?${queryParams.toString()}` 
+      : endpoint;
+
+    return fetchApi<T>(url, {
+      ...fetchOptions,
+      method: 'GET'
+    });
+  },
+    
+  post: <T>(endpoint: string, data?: unknown, options?: RequestInit) =>
+    fetchApi<T>(endpoint, {
+      ...options,
+      method: 'POST',
+      body: data instanceof FormData || data instanceof URLSearchParams ? data : JSON.stringify(data),
+    }),
+
+  login: (username: string, password: string) => {
+    const formData = new URLSearchParams();
+    formData.append('username', username);
+    formData.append('password', password);
+
+    return api.post<{
+      access_token: string;
+      token_type: string;
+      user_id: string;
+      username: string;
+      email: string;
+    }>('/auth/token', formData, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      }
+    });
+  },
+    
+  put: <T>(endpoint: string, data?: unknown, options?: RequestInit) =>
+    fetchApi<T>(endpoint, {
+      ...options,
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  patch: <T>(endpoint: string, data?: unknown, options?: RequestInit) =>
+    fetchApi<T>(endpoint, {
+      ...options,
+      method: 'PATCH', 
+      body: JSON.stringify(data),
+    }),
+    
+  delete: <T>(endpoint: string, options?: RequestInit) =>
+    fetchApi<T>(endpoint, { ...options, method: 'DELETE' }),
+
+  createCheckoutSession: (productKey: string) => 
+    api.post<{ checkout_url: string }>('billing/create-checkout-session', { product_key: productKey }),
+
+  // Admin endpoints
+  admin: {
+    getHealth: (options?: RequestInit) =>
+      fetchApi<{
+        status: string;
+        version: string;
+        uptime: string;
+        memory_usage: string;
+      }>('/admin/health', {
+        ...options,
+        method: 'GET',
+      }),
+    getStatus: (options?: RequestInit) =>
+      fetchApi<{
+        api_status: {
+          status: 'healthy' | 'degraded' | 'down';
+          response_time: string;
+          last_checked: string;
+        };
+        database_status: {
+          status: 'healthy' | 'degraded' | 'down';
+          connections: number;
+          last_checked: string;
+        };
+        cache_status: {
+          status: 'healthy' | 'degraded' | 'down';
+          hit_rate: string;
+          last_checked: string;
+        };
+        message_queue_status: {
+          status: 'healthy' | 'degraded' | 'down';
+          queue_size: number;
+          last_checked: string;
+        };
+      }>('/admin/status', {
+        ...options, 
+        method: 'GET',
+      }), 
+    getMetrics: (options?: RequestInit) =>
+      fetchApi<{
+        total_users: number;
+        active_conversations: number;
+        api_calls_24h: number;
+      }>('/admin/metrics', {
+        ...options,
+        method: 'GET',
+      }),
+  },
 };
 
-// Get a specific conversation by ID
-export const getConversation = async (id: string) => {
-  return get(`/conversations/${id}`);
-};
-
-// Get all messages for a conversation
-export const getConversationMessages = async (id: string) => {
-  return get(`/conversations/${id}/messages`);
-};
-
-// Create a new conversation
-export interface ConversationCreateParams {
-  title: string;
-  description?: string;
-  participants?: { email: string; name?: string }[];
-  agent_types?: string[];
+export function getAuthHeaders(token: string): HeadersInit {
+  return {
+    Authorization: `Bearer ${token}`,
+  };
 }
-
-export interface Conversation {
-  id: string;
-  title: string;
-  description?: string;
-  created_at: string;
-  updated_at: string;
-  is_active: boolean;
-  creator_id: string;
-  [key: string]: any; // Allow for additional properties
-}
-
-export const createConversation = async (params: ConversationCreateParams): Promise<Conversation> => {
-  return post<Conversation>('/conversations', params);
-};
-
-// Delete a conversation
-export const deleteConversation = async (id: string) => {
-  return del(`/conversations/${id}`);
-};
-
-// Add a participant to a conversation
-export const addParticipant = async (conversationId: string, email: string, name?: string) => {
-  return post(`/conversations/${conversationId}/add-participant`, { email, name });
-};
-
-// Remove a participant from a conversation
-export const removeParticipant = async (conversationId: string, email: string) => {
-  // DELETE request with body is not standard, so we need to use post with a delete method
-  // or adjust the implementation based on the API's requirements
-  return post(`/conversations/${conversationId}/remove-participant`, { email });
-};
-
-// Send invitations to all participants in a conversation
-export const sendInvitations = async (conversationId: string) => {
-  return post(`/conversations/${conversationId}/send-invitations`);
-};
-
-// Join a conversation using an invitation token
-export const joinConversation = async (token: string, name?: string) => {
-  return post('/conversations/join', { invitation_token: token, name });
-};

@@ -1,255 +1,347 @@
-'use client'
-import React, { useEffect, useState, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+'use client';
+
+import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import MessageList from '@/components/conversations/MessageList';
-import MessageInput from '@/components/conversations/MessageInput';
-import { getConversation, getConversationMessages } from '@/services/api';
-import { useWebSocket } from '@/hooks/useWebSocket';
+import { MainLayout } from '@/components/layout/MainLayout';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Loader2 } from 'lucide-react';
 
-interface Message {
-  id: string;
-  content: string;
-  created_at: string;
-  participant_id?: string;
-  agent_id?: string;
-  message_info?: {
-    participant_name?: string;
-    participant_email?: string;
-    is_owner?: boolean;
-    source?: string;
-    file_name?: string;
-    file_type?: string;
-    programming_language?: string;
+import { 
+  MessageList, 
+  MessageInput, 
+  TypingIndicator,
+  StreamingIndicator
+} from './components';
+import { 
+  useMessageLoader, 
+  useWebSocket, 
+  useScrollManager,
+  useConversation,
+  useStreamingTokens
+} from './hooks';
+import { Message, MessageMetadata } from './types/message.types';
+import { TypingStatusMessage, TokenMessage } from './types/websocket.types';
+import { participantStorage } from '@/lib/participantStorage';
+import { ChevronLeft, UserPlus } from 'lucide-react';
+import { useToast } from '@/components/ui/use-toast';
+import { conversationService } from '@/services/conversations';
+
+interface TypingState {
+  [identifier: string]: {
+    isTyping: boolean;
+    agentType?: string;
+    name?: string;
+    email?: string;
+    isAgent: boolean;
   };
 }
 
-interface Conversation {
-  id: string;
-  title: string;
-  description?: string;
-  participants: any[];
-  agents: any[];
-}
-
-export default function ConversationPage({ params }: { params: { id: string } }) {
-  const { id } = params;
+export default function ConversationPage() {
+  const params = useParams();
   const router = useRouter();
-  const { user, isLoading } = useAuth();
-  const [conversation, setConversation] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoadingData, setIsLoadingData] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // Real-time typing status tracking
-  const [typingUsers, setTypingUsers] = useState<Record<string, { name?: string, timestamp: number }>>({});
+  const searchParams = useSearchParams();
+  const { token, user } = useAuth();
+  const { toast } = useToast();
+  const conversationId = params.id as string;
+  const [typingStates, setTypingStates] = useState<TypingState>({});
+  const [hideAwaitingMessage, setHideAwaitingMessage] = useState<boolean>(false);
+  const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
+  const [email, setEmail] = useState('');
+  const isPrivacyEnabled: boolean = searchParams.get('privacy') === 'true';
   
-  // Connect to WebSocket
+  // Streaming tokens handling
+  const { streamingState, handleToken, resetStreamingForAgent } = useStreamingTokens();
+  
+  const messageQueueRef = useRef<Message[]>([]);
+  const isProcessingRef = useRef(false);
+  const awaitingInputTimeoutRef = useRef<NodeJS.Timeout>();
+
+  const { conversation, error, isLoading } = useConversation(conversationId, token);
+
+  const {
+    messages,
+    isLoading: messagesLoading,
+    addMessage
+  } = useMessageLoader({
+    conversationId,
+    token: token || ''
+  });
+
   const { 
-    connect, 
-    disconnect, 
-    sendMessage, 
-    sendTypingStatus, 
-    lastMessage,
-    streamingTokens, 
-    clearStreamingTokens
-  } = useWebSocket();
-
-  // Handle incoming WebSocket messages
+    scrollContainerRef,
+    messagesEndRef, 
+    scrollToBottom
+  } = useScrollManager(messages);
+  
+  // Auto-scroll when new streaming content arrives
   useEffect(() => {
-    if (lastMessage) {
-      if (lastMessage.type === 'message') {
-        setMessages(prev => {
-          // Check if message already exists
-          if (prev.some(msg => msg.id === lastMessage.id)) {
-            return prev;
-          }
-          
-          // Ensure all required fields have non-undefined values
-          const newMessage: Message = {
-            id: lastMessage.id || `msg-${Date.now()}`, // Fallback ID if undefined
-            content: lastMessage.content || '',
-            created_at: lastMessage.timestamp 
-              ? new Date(lastMessage.timestamp).toISOString() 
-              : new Date().toISOString(),
-            participant_id: lastMessage.identifier,
-            agent_id: lastMessage.agent_type ? lastMessage.identifier : undefined,
-            message_info: {
-              participant_name: lastMessage.agent_type || 'User',
-              participant_email: lastMessage.email,
-              is_owner: lastMessage.is_owner,
-              source: lastMessage.agent_type || 'user',
-              ...(lastMessage.message_metadata || {})
-            }
-          };
-          
-          return [...prev, newMessage];
-        });
-        clearStreamingTokens();
-      } else if (lastMessage.type === 'typing_status') {
-        handleTypingStatus(lastMessage);
-      }
+    // If any agent is actively streaming, scroll to bottom
+    const hasActiveStreaming = Object.values(streamingState).some(state => state.active);
+    if (hasActiveStreaming) {
+      // Use a small delay to allow the DOM to update
+      const timeoutId = setTimeout(() => {
+        scrollToBottom(false);
+      }, 100);
+      return () => clearTimeout(timeoutId);
     }
-  }, [lastMessage, clearStreamingTokens]);
+  }, [streamingState, scrollToBottom]);
 
-  // Handle typing status updates
-  const handleTypingStatus = (data: any) => {
-    const { identifier, is_typing, timestamp } = data;
-    const now = Date.now();
-    
-    setTypingUsers(prev => {
-      // If user stopped typing or it's the current user, remove from typing list
-      if (!is_typing || (user && identifier === user.email)) {
-        const { [identifier]: _, ...rest } = prev;
-        return rest;
+  useEffect(() => {
+    const checkAuth = async () => {
+      const participantSession = participantStorage.getSession(conversationId);
+      const hasAuth = !!token || !!participantSession;
+      if (!hasAuth) {
+        router.replace('/login');
       }
-      
-      // Otherwise, add/update typing status
-      return {
-        ...prev,
-        [identifier]: { 
-          name: data.participant_name || data.agent_type || identifier,
-          timestamp: now
-        }
-      };
-    });
-  };
+    };
 
-  // Clean up expired typing indicators
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setTypingUsers(prev => {
-        const updated = { ...prev };
-        let changed = false;
-        
-        // Remove typing indicators older than 3 seconds
-        Object.entries(updated).forEach(([key, value]) => {
-          if (now - value.timestamp > 3000) {
-            delete updated[key];
-            changed = true;
-          }
-        });
-        
-        return changed ? updated : prev;
+    checkAuth();
+  }, [conversationId, token, router]);
+
+  const handleAddParticipant = async () => {
+    if (!email) {
+      toast({
+        title: "Invalid Email",
+        description: "Please enter a valid email address",
+        variant: "destructive"
       });
-    }, 1000);
-    
-    return () => clearInterval(interval);
-  }, []);
-
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streamingTokens]);
-
-  // Load conversation data
-  useEffect(() => {
-    if (!isLoading && !user) {
-      router.push('/login');
       return;
     }
 
-    if (user && id) {
-      const loadData = async () => {
-        try {
-          setIsLoadingData(true);
-          setError(null);
+    if (!token) {
+      toast({
+        title: "Authentication Error",
+        description: "You must be logged in to add participants",
+        variant: "destructive"
+      });
+      return;
+    }
 
-          // Fetch conversation details
-          const conversationData = await getConversation(id);
-          setConversation(conversationData as Conversation);
+    try {
+      const response = await conversationService.addParticipant(conversationId, { email }, token);
+    
+      toast({
+        title: "Participant Management",
+        description: response.message,
+        variant: response.message.includes('already') ? "default" : undefined
+      });
+    
+      setEmail('');
+    } catch (error) {
+      toast({
+        title: "Add Participant Error",
+        description: error instanceof Error 
+          ? error.message 
+          : "Failed to add participant",
+        variant: "destructive"
+      });
+    }
+  };
 
-          // Fetch messages
-          const messagesData = await getConversationMessages(id);
-          setMessages(messagesData as Message[] || []);
-
-          // Connect to WebSocket
-          connect(id);
-        } catch (err) {
-          console.error('Error loading conversation:', err);
-          setError('Failed to load conversation data');
-        } finally {
-          setIsLoadingData(false);
+  const handleMessage = useCallback((message: Message) => {
+    if (!message.sender.is_owner) {
+      setHideAwaitingMessage(true);
+      if (awaitingInputTimeoutRef.current) {
+        clearTimeout(awaitingInputTimeoutRef.current);
+      }
+      
+      // When a complete message arrives from an agent, clear any streaming indicators for that agent
+      if (message.sender.type === 'agent' && message.sender.name) {
+        // Special handling for moderator agent since it might use a synthetic response
+        if (message.sender.name.toLowerCase() === 'moderator') {
+          // Reset all streaming states as the moderator response completes the collaboration
+          Object.keys(streamingState).forEach(agent => {
+            resetStreamingForAgent(agent, message.id);
+          });
+        } else {
+          // Just reset the specific agent
+          resetStreamingForAgent(message.sender.name, message.id);
         }
-      };
-
-      loadData();
+        
+        // Force a small delay to ensure the UI updates correctly
+        setTimeout(() => {
+          requestAnimationFrame(() => {
+            scrollToBottom(true);
+          });
+        }, 150);
+      }
+    } else {
+      if (typingUsers.size === 0) {
+        setHideAwaitingMessage(false);
+      }
     }
-
-    // Disconnect WebSocket when component unmounts
-    return () => {
-      disconnect();
-    };
-  }, [id, user, isLoading, router, connect, disconnect]);
-
-  // Handle message submission
-  const handleSendMessage = (content: string, metadata?: any) => {
-    if (content.trim()) {
-      sendMessage(content, metadata);
+    
+    messageQueueRef.current.push(message);
+    if (!isProcessingRef.current) {
+      isProcessingRef.current = true;
+      requestAnimationFrame(() => {
+        const messagesToAdd = [...messageQueueRef.current];
+        messageQueueRef.current = [];
+        isProcessingRef.current = false;
+        
+        messagesToAdd.forEach(msg => {
+          addMessage(msg);
+        });
+        
+        scrollToBottom(true);
+      });
     }
-  };
+  }, [addMessage, resetStreamingForAgent, scrollToBottom, typingUsers.size, streamingState]);
 
-  // Handle typing status
-  const handleTyping = (isTyping: boolean) => {
-    sendTypingStatus(isTyping);
-  };
+  const handleTypingStatus = useCallback((status: TypingStatusMessage) => {
+    setTypingUsers(prev => {
+      const next = new Set(prev);
+      if (status.is_typing) {
+        next.add(status.identifier);
+        setHideAwaitingMessage(true);
+      } else {
+        next.delete(status.identifier);
+        if (next.size === 0) {
+          setHideAwaitingMessage(false);
+        }
+      }
+      return next;
+    });
 
-  if (isLoading || isLoadingData) {
+    setTypingStates(prev => {
+      const next = { ...prev };
+      if (status.is_typing) {
+        next[status.identifier] = {
+          isTyping: true,
+          agentType: status.agent_type,
+          name: status.name,
+          email: status.email,
+          isAgent: !!status.agent_type
+        };
+      } else {
+        delete next[status.identifier];
+      }
+      return next;
+    });
+  }, []);
+
+  // Handle streaming tokens
+  const handleTokenMessage = useCallback((tokenMessage: TokenMessage) => {
+    if (tokenMessage.token) {
+      handleToken(tokenMessage);
+    }
+  }, [handleToken]);
+
+  const wsConfig = useMemo(() => ({
+    conversationId,
+    token,
+    userId: user?.id,
+    userEmail: user?.email,
+    onMessage: handleMessage,
+    onTypingStatus: handleTypingStatus,
+    onToken: handleTokenMessage
+  }), [conversationId, token, user?.id, user?.email, handleMessage, handleTypingStatus, handleTokenMessage]);
+
+  const { sendMessage, sendTypingStatus, isConnected } = useWebSocket(wsConfig);
+
+  if (isLoading || messagesLoading) {
     return (
-      <div className="flex justify-center items-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-      </div>
+      <MainLayout>
+        <div className="text-center py-8">Loading conversation...</div>
+      </MainLayout>
     );
   }
 
-  if (error) {
+  if (error || !conversation) {
     return (
-      <div className="container mx-auto px-4 py-8 text-center">
-        <div className="bg-red-50 text-red-700 p-4 rounded-md mb-4">
-          {error}
+      <MainLayout>
+        <div className="text-red-500 py-8">
+          {error || 'Conversation not found'}
         </div>
-        <button 
-          onClick={() => router.push('/conversations')}
-          className="text-blue-600 hover:underline"
-        >
-          Back to conversations
-        </button>
-      </div>
+      </MainLayout>
     );
   }
 
   return (
-    <div className="flex flex-col h-screen">
-      {/* Header */}
-      <div className="flex items-center border-b px-4 py-3">
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold">{conversation?.title}</h1>
-          {conversation?.description && (
-            <p className="text-sm text-gray-500">{conversation.description}</p>
-          )}
+    <MainLayout title={conversation.title}>
+      <div className="container mx-auto p-4 space-y-4">
+       {conversation.owner_id === user?.id && (
+        <div className="flex items-center space-x-4 w-full">
+          <Button
+            variant="outline"
+            onClick={() => router.push('/conversations')}
+            className="flex items-center"
+          >
+            <ChevronLeft className="mr-2 h-4 w-4" />
+            Back to Conversations
+          </Button>
+
+          <div className="flex space-x-2 flex-grow">
+            <Input
+              type="email"
+              placeholder="Enter participant email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="flex-grow"
+            />
+            <Button onClick={handleAddParticipant}>
+              <UserPlus className="mr-2 h-4 w-4" />
+              Invite Participant
+            </Button>
+          </div>
+        </div>
+        )}
+        <div className="h-[calc(100vh-200px)]">
+          <Card className="h-full">
+            <CardContent className="h-full p-0">
+              <div className="flex flex-col h-full">
+                <div
+                  ref={scrollContainerRef}
+                  className="flex-1 min-h-0 overflow-y-auto scroll-smooth"
+                >
+                  <MessageList messages={messages} />
+                  <div ref={messagesEndRef} />
+                </div>
+
+                <div className="flex-shrink-0 p-4 border-t">
+                  {!hideAwaitingMessage && (
+                    <div className="text-sm text-gray-500 mb-2 flex items-center">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Awaiting input...
+                    </div>
+                  )}
+
+                  <TypingIndicator
+                    typingStates={typingStates}
+                  />
+                  
+                  {/* Render streaming indicators for each agent that is streaming */}
+                  {Object.entries(streamingState).map(([agentType, state]) => (
+                    state.active && (
+                      <StreamingIndicator
+                        key={agentType}
+                        agentType={agentType}
+                        streamingContent={state.tokens}
+                        isActive={state.active}
+                      />
+                    )
+                  ))}
+                  
+                  <MessageInput
+                    onSendMessage={(content: string, metadata?: MessageMetadata) => {
+                      console.log('MessageInput sending message:', { content, metadata });
+                      sendMessage(content, metadata);
+                      requestAnimationFrame(() => scrollToBottom(true));
+                    }}
+                    onTypingStatus={sendTypingStatus}
+                    disabled={!isConnected || (!user && !participantStorage.getSession(conversationId))}
+                    conversationId={conversationId}
+                    isPrivacyEnabled={isPrivacyEnabled}
+                  />
+		  </div>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-auto p-4">
-        <MessageList 
-          messages={messages} 
-          currentUser={user}
-          streamingContent={streamingTokens}
-          typingUsers={Object.entries(typingUsers).map(([id, data]) => ({
-            id,
-            name: data.name || id
-          }))}
-        />
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      <div className="border-t p-4">
-        <MessageInput onSendMessage={handleSendMessage} onTyping={handleTyping} />
-      </div>
-    </div>
+    </MainLayout>
   );
 }
