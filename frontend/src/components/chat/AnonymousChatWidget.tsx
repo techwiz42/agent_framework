@@ -1,9 +1,10 @@
 // src/components/chat/AnonymousChatWidget.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageCircle, X, Send, Bot, Minimize2, Maximize2, Mic, MicOff } from 'lucide-react';
+import { MessageCircle, X, Send, Bot, Minimize2, Maximize2, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import SimpleBadge from '@/components/ui/SimpleBadge';
+import { Toggle } from '@/components/ui/toggle';
 import { formatDistanceToNow } from 'date-fns';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -43,9 +44,15 @@ export const AnonymousChatWidget: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('');
   
+  // Text-to-speech states
+  const [isTtsEnabled, setIsTtsEnabled] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [ttsVoice, setTtsVoice] = useState('en-US-Neural2-C'); // Default voice
+  
   // Speech-to-text refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   
   // Using CUSTOMERSERVICE agent
   const agentType = 'CUSTOMERSERVICE';
@@ -94,15 +101,27 @@ export const AnonymousChatWidget: React.FC = () => {
             timestamp: new Date(),
             agentType: agentType
           }]);
+          
+          // Play welcome message
+          if (isTtsEnabled) {
+            playMessageAudio(welcomeMessage);
+          }
         } else {
           // For reconnections, add a different message
+          const reconnectMessage = "I'm connected again. How can I help you?";
+          
           setMessages(prev => [...prev, {
             id: uuidv4(),
-            content: "I'm connected again. How can I help you?",
+            content: reconnectMessage,
             sender: 'agent' as const,
             timestamp: new Date(),
             agentType: agentType
           }]);
+          
+          // Play reconnection message
+          if (isTtsEnabled) {
+            playMessageAudio(reconnectMessage);
+          }
         }
       };
       
@@ -112,16 +131,23 @@ export const AnonymousChatWidget: React.FC = () => {
           const data = JSON.parse(event.data);
           
           if (data.type === 'message') {
-            setMessages(prev => [...prev, {
+            const newMessage = {
               id: data.id || uuidv4(),
               content: formatAgentResponse(data.content),
               sender: 'agent' as const,
               timestamp: new Date(data.timestamp),
               agentType: data.agent_type || agentType
-            }]);
+            };
+            
+            setMessages(prev => [...prev, newMessage]);
             setIsTyping(false);
+            
+            // Play TTS for this complete message
+            if (isTtsEnabled) {
+              playMessageAudio(data.content);
+            }
           } else if (data.type === 'token') {
-            // Handle streaming tokens
+            // Handle streaming tokens (no TTS for streaming since we wait for complete messages)
             setMessages(prev => {
               const lastMessage = prev[prev.length - 1];
               
@@ -207,6 +233,12 @@ export const AnonymousChatWidget: React.FC = () => {
           }
           wsRef.current = null;
         }
+        
+        // Also stop any audio playback
+        if (audioPlayerRef.current) {
+          audioPlayerRef.current.pause();
+          audioPlayerRef.current = null;
+        }
       };
     }
   }, [isOpen, sessionId, agentType]);
@@ -217,6 +249,112 @@ export const AnonymousChatWidget: React.FC = () => {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  // Text-to-speech functions
+  const playMessageAudio = async (message: string) => {
+    if (!isTtsEnabled || !message.trim()) return;
+    
+    try {
+      setIsPlayingAudio(true);
+      const apiUrl = `${window.location.protocol}//${window.location.host}/api/voice/text-to-speech`;
+      
+      console.log('Converting message to speech:', message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: message,
+          voice_id: ttsVoice,
+          return_base64: true,
+          speaking_rate: 1.0,
+          preprocess_text: true
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('TTS error:', response.status, errorText);
+        setIsPlayingAudio(false);
+        return;
+      }
+      
+      const data = await response.json();
+      
+      if (data.success && data.audio_base64) {
+        // Create a URL for the audio
+        const audioBlob = base64ToBlob(data.audio_base64, data.mime_type);
+        const audioUrl = URL.createObjectURL(audioBlob);
+        
+        // Create or use existing audio element
+        if (!audioPlayerRef.current) {
+          audioPlayerRef.current = new Audio();
+        }
+        
+        // Set up event handlers
+        audioPlayerRef.current.onended = () => {
+          setIsPlayingAudio(false);
+        };
+        
+        audioPlayerRef.current.onerror = (error) => {
+          console.error('Audio playback error:', error);
+          setIsPlayingAudio(false);
+        };
+        
+        // Set source and play
+        audioPlayerRef.current.src = audioUrl;
+        await audioPlayerRef.current.play();
+      } else {
+        console.error('TTS response missing audio data:', data);
+        setIsPlayingAudio(false);
+      }
+    } catch (error) {
+      console.error('Error playing TTS audio:', error);
+      setIsPlayingAudio(false);
+    }
+  };
+
+  // Function to stop audio playback
+  const stopAudioPlayback = () => {
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.currentTime = 0;
+      setIsPlayingAudio(false);
+    }
+  };
+
+  // Helper function to convert base64 to Blob
+  const base64ToBlob = (base64: string, mimeType: string) => {
+    const byteCharacters = atob(base64);
+    const byteArrays = [];
+    
+    for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+      const slice = byteCharacters.slice(offset, offset + 512);
+      
+      const byteNumbers = new Array(slice.length);
+      for (let i = 0; i < slice.length; i++) {
+        byteNumbers[i] = slice.charCodeAt(i);
+      }
+      
+      const byteArray = new Uint8Array(byteNumbers);
+      byteArrays.push(byteArray);
+    }
+    
+    return new Blob(byteArrays, { type: mimeType });
+  };
+
+  // Cleanup effect for audio playback
+  useEffect(() => {
+    return () => {
+      // Cleanup function to stop audio and release resources when component unmounts
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current = null;
+      }
+    };
+  }, []);
 
   // Handle sending a message
   const handleSendMessage = () => {
@@ -684,6 +822,26 @@ export const AnonymousChatWidget: React.FC = () => {
             </div>
           </div>
         </div>
+        
+        {/* Text-to-speech toggle */}
+        <div className="ml-auto mr-2">
+          <Toggle
+            aria-label="Toggle text-to-speech"
+            pressed={isTtsEnabled}
+            onPressedChange={(pressed) => {
+              setIsTtsEnabled(pressed);
+              if (!pressed && isPlayingAudio) {
+                stopAudioPlayback();
+              }
+            }}
+          >
+            {isTtsEnabled ? 
+              <Volume2 size={16} className={isPlayingAudio ? 'text-green-400 animate-pulse' : ''} /> : 
+              <VolumeX size={16} />
+            }
+          </Toggle>
+        </div>
+        
         <div className="flex gap-2">
           <Button 
             variant="ghost" 
@@ -755,61 +913,34 @@ export const AnonymousChatWidget: React.FC = () => {
           </div>
         )}
         
-        <div className="flex flex-col gap-2">
-          {/* Connection Status */}
-          {!isConnected && (
-            <div className="bg-yellow-100 text-yellow-800 text-xs p-2 rounded w-full">
-              Connection issue. Messages may not be sent. <button onClick={connectWebSocket} className="underline font-bold">Try reconnecting</button>
-            </div>
-          )}
-          
-          {/* Input Form */}
-          <form 
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSendMessage();
-            }}
-            className="flex gap-2"
+        <div className="flex gap-2 items-center">
+          <Button
+            variant={isRecording ? "destructive" : "outline"}
+            size="icon"
+            onClick={isRecording ? stopRecording : startRecording}
+            className={isRecording ? "bg-red-500 hover:bg-red-600 text-white" : ""}
+            aria-label={isRecording ? "Stop recording" : "Start recording"}
           >
-            <Input
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message..."
-              className="flex-1"
-              aria-label="Message input"
-              autoComplete="off"
-              id="chat-input"
-              name="message"
-            />
-            
-            {/* Mic Button */}
-            <Button
-              type="button"
-              onClick={isRecording ? stopRecording : startRecording}
-              className={`${
-                isRecording 
-                  ? 'bg-red-600 hover:bg-red-700' 
-                  : 'bg-blue-600 hover:bg-blue-700'
-              } text-white`}
-              title={isRecording ? 'Stop recording' : 'Start recording'}
-            >
-              {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
-            </Button>
-            
-            {/* Send Button */}
-            <Button 
-              type="submit"
-              disabled={!inputValue.trim()}
-              className="bg-blue-600 hover:bg-blue-700 text-white"
-            >
-              <Send size={16} />
-            </Button>
-          </form>
-        </div>
-        
-        <div className="mt-2 text-xs text-gray-400 text-center">
-          Chat is anonymous and not stored
+            {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
+          </Button>
+          
+          <Input
+            className="flex-1"
+            placeholder="Type your message..."
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={!isConnected}
+          />
+          
+          <Button
+            type="submit"
+            onClick={handleSendMessage}
+            aria-label="Send message"
+            disabled={!inputValue.trim() || !isConnected}
+          >
+            <Send size={18} />
+          </Button>
         </div>
       </div>
     </div>

@@ -118,6 +118,7 @@ def register_routers(app: FastAPI):
     
     # Register voice API routers
     from app.api.voice import stt_router
+    from app.api.voice import tts_router
     
     # Log route information
     logger.info(f"Google router prefix: {google_router.prefix}")
@@ -148,6 +149,7 @@ def register_routers(app: FastAPI):
     
     # Voice API routes
     app.include_router(stt_router, prefix="/api/voice", tags=["voice"])
+    app.include_router(tts_router, prefix="/api/voice", tags=["voice"])
     logger.info("Voice API router registered with prefix /api/voice")
     
     # Anonymous chat functionality 
