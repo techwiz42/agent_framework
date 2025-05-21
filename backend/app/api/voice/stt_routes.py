@@ -127,11 +127,7 @@ async def speech_to_text(
         
         logger.info(f"Using audio encoding: {encoding}, sample rate: {sample_rate_hz} Hz")
         
-        # Add stack trace before processing
-        stack_trace = traceback.format_stack()
-        logger.info(f"Pre-processing stack trace:\n{''.join(stack_trace)}")
-        
-        # Process the audio
+        # Process the audio without excessive stack trace logging
         result = stt_service.transcribe_audio(
             audio_content=audio_content,
             language_code=language_code,
@@ -143,30 +139,31 @@ async def speech_to_text(
         
         # Check for success
         if result.get("success", False):
-            logger.info(f"STT success: {result.get('transcript', '')[:30]}...")
-            return {
-                "success": True,
-                "transcript": result.get("transcript", ""),
-                "confidence": result.get("confidence", 0)
-            }
-        else:
-            error_msg = result.get("error", "Unknown error")
-            details = result.get("details", "")
+            # Handle both regular transcription and "no speech detected" cases
+            transcript = result.get("transcript", "")
+            confidence = result.get("confidence", 0)
+            message = result.get("message", "")
             
-            # Special case: "No speech detected" should not be a 500 error
-            # Instead, return a successful response with an empty transcript
-            if error_msg == "No speech detected":
+            if transcript:
+                logger.info(f"STT success: {transcript[:30]}...")
+            elif message == "No speech detected":
                 logger.info("No speech detected, returning empty transcript with success=true")
-                # Process any audio chunks that were sent before this one
+                # Log audio details for debugging no-speech cases
                 if 'audio_content' in locals() and len(audio_content) > 0:
                     first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:20]])
                     logger.info(f"Audio that triggered 'No speech detected': size={len(audio_content)} bytes, first bytes: {first_few_bytes}")
-                return {
-                    "success": True,
-                    "transcript": "",
-                    "confidence": 0,
-                    "message": "No speech detected"
-                }
+            
+            # Return successful response (with or without transcript)
+            return {
+                "success": True,
+                "transcript": transcript,
+                "confidence": confidence,
+                "message": message
+            }
+        else:
+            # Handle actual errors
+            error_msg = result.get("error", "Unknown error")
+            details = result.get("details", "")
             
             logger.error(f"STT error (code 500): {error_msg}")
             if details:

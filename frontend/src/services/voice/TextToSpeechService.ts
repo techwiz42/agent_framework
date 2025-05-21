@@ -40,7 +40,7 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
   const opts = { ...defaultOptions, ...options };
 
   // States
-  const [isEnabled, setIsEnabled] = useState(false);
+  const [isEnabled, setIsEnabled] = useState(false); // Default to disabled
   const [isPlaying, setIsPlaying] = useState(false);
 
   // Refs

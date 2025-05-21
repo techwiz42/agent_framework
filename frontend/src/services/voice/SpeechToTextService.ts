@@ -41,9 +41,9 @@ declare global {
 export const useSpeechToText = (options: SttOptions = {}) => {
   // Default options
   const defaultOptions: Required<SttOptions> = {
-    silenceThreshold: 12,
-    silentFramesToProcess: 8,
-    speakingFramesToProcess: 30,
+    silenceThreshold: 10, // Lower threshold to detect more subtle sounds
+    silentFramesToProcess: 6, // Process audio sooner when silence is detected
+    speakingFramesToProcess: 20, // Process audio sooner when speaking
     sampleRate: 48000,
     languageCode: 'en-US',
     apiUrl: `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`,
@@ -85,8 +85,9 @@ export const useSpeechToText = (options: SttOptions = {}) => {
     }
     
     try {
-      // Filter out tiny chunks that are likely empty
-      const validChunks = audioChunksRef.current.filter(chunk => chunk.size > 100);
+      // Filter out tiny chunks that are likely empty, but use a lower threshold
+      // to ensure we don't lose speech with quiet beginnings
+      const validChunks = audioChunksRef.current.filter(chunk => chunk.size > 50);
       
       if (validChunks.length === 0) {
         console.log('No valid audio chunks to process');
@@ -98,21 +99,21 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       const mimeType = mediaRecorderRef.current.mimeType;
       const audioBlob = new Blob(validChunks, { type: mimeType });
       
-      if (audioBlob.size < 2000) {
-        // Audio is too small, likely no speech or too short for recognition
-        console.log(`Audio too small (${audioBlob.size} bytes), skipping processing`);
-        audioChunksRef.current = []; // Clear chunks for next segment
-        return;
+      // Process even small audio chunks for faster response
+      if (audioBlob.size < 500) {
+        console.log(`Small audio (${audioBlob.size} bytes), might be brief utterance`);
+        // Continue processing anyway for better responsiveness
       }
       
-      // Show status
-      updateStatus('Processing...');
+      // Don't show processing status - this improves perceived performance
+      // We'll let transcription appear as it happens without UI changes
       
       // Log audio info for debugging
       console.log(`Processing audio: size=${audioBlob.size} bytes, type=${mimeType}`);
-      console.log(`Chunk count: ${validChunks.length}, average chunk size: ${audioBlob.size/validChunks.length} bytes`);
       
-      // Clear chunks for next recording immediately
+      // Keep a copy of the current chunks before clearing
+      const currentChunks = [...audioChunksRef.current];
+      // Clear chunks for next recording immediately to allow parallel processing
       audioChunksRef.current = []; 
       
       // Send the audio blob to the backend for STT
@@ -121,17 +122,18 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       formData.append('audio_file', audioBlob, fileName);
       formData.append('language_code', opts.languageCode);
       
-      // Always send sample rate information
+      // For WebM/Opus, always send 48000 Hz as sample rate
       if (mimeType.includes('webm') || mimeType.includes('opus')) {
-        formData.append('sample_rate', opts.sampleRate.toString());
+        formData.append('sample_rate', '48000');
       } else {
         formData.append('sample_rate', '16000');
       }
       
-      // Add additional parameters to improve STT performance
+      // Add parameters for real-time transcription optimization
       formData.append('model', 'default');
       formData.append('content_type', mimeType);
       formData.append('is_webm', mimeType.includes('webm') ? 'true' : 'false');
+      formData.append('partial_results', 'true'); // Request partial results if supported
       
       console.log(`Sending audio for processing: ${audioBlob.size} bytes, ${validChunks.length} chunks`);
       const response = await fetch(opts.apiUrl, {
@@ -150,7 +152,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       
       if (data.success) {
         if (data.transcript) {
-          // Return transcribed text
+          // Return transcribed text immediately without delay
           const transcript = data.transcript.trim();
           if (transcript) {
             console.log('Got transcript:', transcript);
@@ -158,24 +160,15 @@ export const useSpeechToText = (options: SttOptions = {}) => {
           }
         } else if (data.message === "No speech detected") {
           console.log('No speech detected in continuous mode, but handled gracefully');
+          // Continue listening since this is expected for silent periods
+          window.hadSpeech = false; // Reset speech detection flag
         }
-        
-        updateStatus('');
       } else if (data.error) {
         console.log('STT error, but continuing to listen:', data.error);
-        updateStatus('');
       }
-      
-      // Clear the status message after a brief period
-      setTimeout(() => {
-        if (isListening) {
-          updateStatus('');
-        }
-      }, 1000);
       
     } catch (error) {
       console.error('Error processing audio segment:', error);
-      updateStatus('');
     }
   };
 
@@ -293,43 +286,43 @@ export const useSpeechToText = (options: SttOptions = {}) => {
           window.silentFrameCount++;
           window.speakingFrameCount = 0;
           
-          // Process audio after specified consecutive silent frames
-          // but only if we've accumulated enough audio chunks and there was speech before
-          if (window.silentFrameCount >= opts.silentFramesToProcess && 
+          // Process audio after fewer silent frames for faster response
+          // Process as soon as we detect a brief pause
+          if (window.silentFrameCount >= Math.min(3, opts.silentFramesToProcess) && 
               silenceTimerRef.current === null && 
-              audioChunksRef.current.length > 5 && 
+              audioChunksRef.current.length > 2 && 
               window.hadSpeech) {
             console.log(`Detected ${window.silentFrameCount} silent frames, processing audio...`);
             
             // Process audio immediately
             processContinuousAudio();
             window.silentFrameCount = 0;
-            window.hadSpeech = false; // Reset speech flag
+            // Don't reset hadSpeech flag - this maintains context between utterances
             
-            // Set marker to avoid double-processing
+            // Set marker to avoid double-processing but with shorter delay
             window.justProcessedAudio = true;
             setTimeout(() => {
               window.justProcessedAudio = false;
-            }, 500);
+            }, 200); // Reduced from 500ms to 200ms
           }
         } else {
           window.speakingFrameCount++;
           window.silentFrameCount = 0;
           window.hadSpeech = true; // Mark that we detected speech
           
-          // Force process after consecutive speaking frames
-          if (window.speakingFrameCount >= opts.speakingFramesToProcess && 
-              audioChunksRef.current.length >= 8 && 
+          // Force process after fewer consecutive speaking frames for faster feedback
+          if (window.speakingFrameCount >= Math.min(10, opts.speakingFramesToProcess) && 
+              audioChunksRef.current.length >= 3 && 
               !window.justProcessedAudio) {
             console.log(`Detected ${window.speakingFrameCount} speaking frames, force processing audio...`);
             processContinuousAudio();
             window.speakingFrameCount = 0;
             
-            // Set marker that we just processed audio
+            // Set marker that we just processed audio with shorter delay
             window.justProcessedAudio = true;
             setTimeout(() => {
               window.justProcessedAudio = false;
-            }, 500);
+            }, 100); // Reduced from 500ms to 100ms
           }
           
           // If we detect sound, clear any pending silence timer
@@ -346,20 +339,26 @@ export const useSpeechToText = (options: SttOptions = {}) => {
         }
       };
       
-      // Set up interval to periodically check for silence
-      const processorInterval = setInterval(detectSilence, 100);
+      // Set up interval to periodically check for silence at a faster rate
+      const processorInterval = setInterval(detectSilence, 50); // Increased from 100ms to 50ms
       audioProcessorIntervalRef.current = processorInterval;
       
-      // Event handler for data available
+      // Event handler for data available - process data more frequently
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
           console.log(`Received audio chunk: ${event.data.size} bytes, type: ${event.data.type}`);
+          
+          // Process audio more aggressively for real-time transcription
+          // Only process if we have enough chunks to make it worthwhile
+          if (audioChunksRef.current.length >= 2) {
+            processContinuousAudio();
+          }
         }
       };
       
-      // Use smaller chunks for more responsive transcription
-      mediaRecorder.start(500);
+      // Use much smaller chunks for more responsive real-time transcription
+      mediaRecorder.start(250); // Reduced from 500ms to 250ms
       
       // Add some setup instructions to help users
       setIsListening(true);

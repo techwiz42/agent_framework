@@ -113,9 +113,10 @@ class GoogleTTSService:
         
         try:
             # Prepare request payload
+            input_type = "ssml" if text.startswith("<speak>") else "text"
             payload = {
                 "input": {
-                    "text": text
+                    input_type: text
                 },
                 "voice": {
                     "languageCode": language_code,
@@ -218,11 +219,16 @@ class GoogleTTSService:
         import re
         text = re.sub(r'https?://\S+', ' link ', text)
         
-        # Add pauses after sentences
-        text = re.sub(r'([.!?])\s+', r'\1 <break time="500ms"/> ', text)
-        
-        # Add SSML markers for pause at commas
-        text = re.sub(r',\s+', ', <break time="200ms"/> ', text)
+        # Wrap the entire text in SSML tags to ensure proper interpretation of SSML
+        if not text.startswith('<speak>'):
+            # Add pauses after sentences 
+            text = re.sub(r'([.!?])\s+', r'\1 <break time="500ms"/> ', text)
+            
+            # Add SSML markers for pause at commas
+            text = re.sub(r',\s+', ', <break time="200ms"/> ', text)
+            
+            # Wrap the text in SSML tags
+            text = f'<speak>{text}</speak>'
         
         # Add SSML for numbers, dates, etc (if needed)
         

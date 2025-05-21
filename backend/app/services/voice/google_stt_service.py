@@ -113,9 +113,21 @@ class GoogleSTTService:
             return {"success": False, "error": "Google API key not configured"}
         
         try:
-            # For WebM files, we don't specify the sample rate (pass None)
+            # Ensure encoding is uppercase and valid first
+            encoding = encoding.upper() if encoding else "LINEAR16"
+            valid_encodings = ["LINEAR16", "FLAC", "MP3", "WEBM_OPUS", "OGG_OPUS", "MULAW", "AMR", "AMR_WB"]
+            if encoding not in valid_encodings:
+                logger.warning(f"Encoding {encoding} not in valid encodings: {valid_encodings}")
+                encoding = "LINEAR16"  # Default to LINEAR16
+                logger.info(f"Using fallback encoding: {encoding}")
+            
+            # SPECIAL CASE: For WebM/OPUS and OGG/OPUS encoding, always use 48000 Hz as it's the standard
+            # This ensures compatibility regardless of what the client sends
+            if encoding == "WEBM_OPUS" or encoding == "OGG_OPUS":
+                logger.info(f"Forcing 48000 Hz sample rate for {encoding} encoding")
+                sample_rate_hertz = 48000
             # For other formats, ensure it's a valid integer
-            if sample_rate_hertz is not None:
+            elif sample_rate_hertz is not None:
                 try:
                     sample_rate_hertz = int(sample_rate_hertz)
                 except (ValueError, TypeError):
@@ -131,21 +143,8 @@ class GoogleSTTService:
                     sample_rate_hertz = min(valid_sample_rates, key=lambda x: abs(x - sample_rate_hertz))
                     logger.info(f"Adjusted sample rate from {original_rate} to {sample_rate_hertz} Hz")
             else:
+                # For formats other than WebM/OPUS and OGG/OPUS that don't specify sample rate
                 logger.info("No sample rate specified - will be extracted from audio header")
-            
-            # Ensure encoding is uppercase and valid
-            encoding = encoding.upper() if encoding else "LINEAR16"
-            valid_encodings = ["LINEAR16", "FLAC", "MP3", "WEBM_OPUS", "OGG_OPUS", "MULAW", "AMR", "AMR_WB"]
-            if encoding not in valid_encodings:
-                logger.warning(f"Encoding {encoding} not in valid encodings: {valid_encodings}")
-                encoding = "LINEAR16"  # Default to LINEAR16
-                logger.info(f"Using fallback encoding: {encoding}")
-            
-            # SPECIAL CASE: For WebM/OPUS encoding, always use 48000 Hz as it's the standard
-            # This ensures compatibility regardless of what the client sends
-            if (encoding == "WEBM_OPUS" or encoding == "OGG_OPUS"):
-                logger.info(f"Forcing 48000 Hz sample rate for {encoding} encoding")
-                sample_rate_hertz = 48000
             
             logger.info(f"Transcribing audio: encoding={encoding}, sample_rate={sample_rate_hertz}Hz, language={language_code}")
             
@@ -210,44 +209,32 @@ class GoogleSTTService:
                     # This is a special case where Google STT returned a billable result
                     # but no transcription (likely no speech detected)
                     
-                    # Add stack trace for debugging
-                    stack_trace = traceback.format_stack()
-                    logger.warning(f"No speech detected response: {json.dumps(response_json)}")
-                    logger.warning(f"No speech stack trace:\n{''.join(stack_trace)}")
+                    # Add minimized logging to reduce noise - only log essential info
+                    logger.info(f"No speech detected in audio - normal operation")
                     
-                    # Get the audio size and log it for debugging
+                    # Get the audio size for minimal logging
                     audio_size = len(audio_content) if audio_content else 0
-                    logger.warning(f"Audio size: {audio_size} bytes, encoding: {encoding}, sample_rate: {sample_rate_hertz}")
+                    logger.info(f"Audio stats: {audio_size} bytes, encoding: {encoding}, sample_rate: {sample_rate_hertz}")
                     
-                    # Add more debugging info about the audio content
-                    if audio_content and len(audio_content) > 0:
+                    # Only log first few bytes if in debug mode
+                    if logger.isEnabledFor(logging.DEBUG) and audio_content and len(audio_content) > 0:
                         first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:20]])
-                        logger.warning(f"First few bytes of audio: {first_few_bytes}")
+                        logger.debug(f"First few bytes of audio: {first_few_bytes}")
                     
-                    # Track no-speech detection events with more detailed info
-                    no_speech_result = {
-                        "success": False,
-                        "error": "No speech detected",
-                        "details": "The audio was processed but no speech was recognized",
+                    # IMPORTANT: Return success=True with empty transcript for no speech detected
+                    # This is consistent with the behavior expected by the frontend
+                    # and prevents errors from propagating to the UI
+                    return {
+                        "success": True,
+                        "transcript": "",
+                        "confidence": 0,
+                        "message": "No speech detected",
                         "audio_info": {
                             "size_bytes": audio_size,
                             "encoding": encoding,
-                            "sample_rate": sample_rate_hertz,
-                            "api_response": response_json  # Include the actual API response for debugging
+                            "sample_rate": sample_rate_hertz
                         }
                     }
-                    
-                    # If audio is too small, provide a more specific error message
-                    if audio_size < 4000:
-                        no_speech_result["details"] += ". The audio sample may be too short or empty."
-                    elif audio_size > 1000000:
-                        no_speech_result["details"] += ". The audio sample is very large - check for encoding issues."
-                    
-                    # Log the content type and first few bytes for debugging
-                    first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:min(40, len(audio_content))]])
-                    logger.warning(f"No speech detected in audio with first bytes: {first_few_bytes}")
-                    
-                    return no_speech_result
                 else:
                     logger.warning(f"No results found in response: {json.dumps(response_json)}")
                 

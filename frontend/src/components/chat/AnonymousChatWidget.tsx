@@ -61,8 +61,13 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   });
 
-  // Initialize text to speech service
+  // Initialize text to speech service with enabled by default
   const tts = useTextToSpeech();
+  
+  // Enable TTS by default
+  useEffect(() => {
+    tts.setEnabled(true);
+  }, []);
 
   // WebSocket connection function 
   const connectWebSocket = () => {
@@ -105,10 +110,9 @@ export const AnonymousChatWidget: React.FC = () => {
             agentType: agentType
           }]);
           
-          // Play welcome message
-          if (tts.isEnabled) {
-            tts.playAudio(welcomeMessage);
-          }
+          // Always play welcome message
+          tts.setEnabled(true);
+          tts.playAudio(welcomeMessage);
         } else {
           // For reconnections, add a different message
           const reconnectMessage = "I'm connected again. How can I help you?";
@@ -121,10 +125,9 @@ export const AnonymousChatWidget: React.FC = () => {
             agentType: agentType
           }]);
           
-          // Play reconnection message
-          if (tts.isEnabled) {
-            tts.playAudio(reconnectMessage);
-          }
+          // Always play reconnection message
+          tts.setEnabled(true);
+          tts.playAudio(reconnectMessage);
         }
       };
       
@@ -145,10 +148,13 @@ export const AnonymousChatWidget: React.FC = () => {
             setMessages(prev => [...prev, newMessage]);
             setIsTyping(false);
             
-            // Play TTS for this complete message
-            if (tts.isEnabled) {
-              tts.playAudio(data.content);
-            }
+            // Always play TTS for complete messages to fix the "no tts at all" issue
+            // Stop any currently playing audio before starting new
+            tts.stopAudio();
+            
+            // Ensure TTS is enabled and then play without delay
+            tts.setEnabled(true);
+            tts.playAudio(data.content);
           } else if (data.type === 'token') {
             // Handle streaming tokens (no TTS for streaming since we wait for complete messages)
             setMessages(prev => {
@@ -440,11 +446,15 @@ export const AnonymousChatWidget: React.FC = () => {
             pressed={tts.isEnabled}
             onPressedChange={(pressed) => {
               tts.setEnabled(pressed);
+              // Play a confirmation sound when enabled
+              if (pressed) {
+                tts.playAudio("Text to speech is now active");
+              }
             }}
-            className="mr-2"
+            className={`mr-2 ${tts.isEnabled ? 'bg-blue-700 hover:bg-blue-800' : ''}`}
           >
             {tts.isEnabled ? 
-              <Volume2 size={16} className={tts.isPlaying ? 'text-green-400 animate-pulse' : ''} /> : 
+              <Volume2 size={16} className={tts.isPlaying ? 'text-green-400 animate-pulse' : 'text-white'} /> : 
               <VolumeX size={16} />
             }
           </Toggle>
