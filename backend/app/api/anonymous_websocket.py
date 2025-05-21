@@ -116,6 +116,8 @@ def check_message_rate_limit(ip: str) -> bool:
 async def send_token(websocket: WebSocket, token: str):
     """Send a streaming token to the client."""
     try:
+        # Use a simple timestamp-based ID for tokens to avoid UUID issues
+        token_id = f"token-{int(time.time() * 1000)}"
         await websocket.send_json({
             "type": "token",
             "token": token,
@@ -140,10 +142,11 @@ async def send_typing_indicator(websocket: WebSocket, agent_type: str, is_typing
 async def send_error_message(websocket: WebSocket, message: str):
     """Send an error message to the client."""
     try:
+        # Convert UUID to string explicitly
         await websocket.send_json({
             "type": "message",
             "content": message,
-            "id": str(uuid4()),
+            "id": str(uuid4()),  # Explicitly convert UUID to string
             "identifier": "system",
             "is_owner": False,
             "email": "system@system.local",
@@ -198,7 +201,8 @@ async def anonymous_websocket_endpoint(
             
         # Generate a connection ID if not provided
         if not connection_id:
-            connection_id = str(uuid4())
+            # Convert UUID to string explicitly
+            connection_id = str(uuid4())  # Explicitly convert UUID to string
         else:
             # Validate connection_id format
             if not re.match(r'^[a-zA-Z0-9_-]+$', connection_id):
@@ -219,9 +223,11 @@ async def anonymous_websocket_endpoint(
         # Increment active connection count
         active_connection_count += 1
         
-        # Set up a virtual thread ID for this anonymous session
-        # This is needed for the agent_manager but won't be persisted
-        virtual_thread_id = f"anonymous-{session_id}"
+        # FIXED: Use a valid UUID for the thread ID
+        # This is the critical fix - create a real UUID to use for the thread
+        thread_uuid = uuid4()
+        # Store the session info in the thread_id for reference
+        virtual_thread_id = str(thread_uuid)
         
         logger.info(f"Anonymous WebSocket connected: {agent_type} / {session_id} / {client_ip}")
         
@@ -257,6 +263,9 @@ async def anonymous_websocket_endpoint(
                         # First send a typing indicator
                         await send_typing_indicator(websocket, agent_type, True)
                         
+                        # Create a message ID for this conversation turn
+                        message_id = str(uuid4())  # Convert UUID to string explicitly
+                        
                         # Define streaming callback for real-time token updates
                         async def streaming_callback(token: str):
                             if token and token.strip():
@@ -275,7 +284,7 @@ async def anonymous_websocket_endpoint(
                                 conversation_agents=[agent_type],
                                 agents_config={agent_type: "Anonymous session"},
                                 mention=agent_type,  # Force this specific agent
-                                thread_id=virtual_thread_id,
+                                thread_id=virtual_thread_id,  # Use the valid UUID string
                                 response_callback=streaming_callback
                             )
                             
@@ -289,7 +298,7 @@ async def anonymous_websocket_endpoint(
                                 await websocket.send_json({
                                     "type": "message",
                                     "content": response,
-                                    "id": str(uuid4()),
+                                    "id": message_id,
                                     "identifier": f"{agent_type.lower()}@system.local",
                                     "is_owner": False,
                                     "email": f"{agent_type.lower()}@system.local",

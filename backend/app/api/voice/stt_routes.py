@@ -1,141 +1,206 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
+# app/api/voice/stt_routes.py
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 import logging
 import traceback
-import json
 from typing import Optional
-import io
 
-from app.services.voice.google_stt_service import GoogleSTTService
-from app.core.input_sanitizer import sanitize_text
+from app.services.voice.google_stt_service import stt_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Initialize STT service
-stt_service = GoogleSTTService()
 
 @router.post("/speech-to-text")
 async def speech_to_text(
     request: Request,
     audio_file: UploadFile = File(...),
-    language_code: Optional[str] = Form("en-US"),
-    sample_rate: Optional[int] = Form(16000)
+    language_code: str = Form("en-US"),
+    sample_rate: Optional[str] = Form(None),
+    content_type: Optional[str] = Form(None),
+    is_webm: Optional[str] = Form(None),
+    model: Optional[str] = Form("default")
 ):
     """
-    Convert speech audio to text using Google's Speech-to-Text API.
+    Convert speech to text using Google's Speech-to-Text API.
     
     Args:
-        audio_file: Audio file in WAV, FLAC, or other supported format
-        language_code: Language code (default: en-US)
-        sample_rate: Audio sample rate in Hz (default: 16000)
-        
+        request: The HTTP request
+        audio_file: The audio file to transcribe
+        language_code: The language code to use for transcription
+        sample_rate: Sample rate in Hz (optional)
+        content_type: Content type of the audio (for debugging)
+        is_webm: Flag indicating if the audio is webm format (for debugging)
+    
     Returns:
-        Transcription result
+        JSON response with transcription result
     """
     client_ip = request.client.host
-    logger.info(f"Speech-to-text request from IP: {client_ip}")
-    logger.info(f"Audio file: {audio_file.filename}, content_type: {audio_file.content_type}, size: Unknown")
+    logger.info(f"STT request from IP: {client_ip}")
     
     try:
-        # Read file content
+        # Log debugging info
+        logger.info(f"Audio file: {audio_file.filename}, size: {audio_file.size}, content_type: {audio_file.content_type}")
+        logger.info(f"Form params - language_code: {language_code}, sample_rate: {sample_rate}")
+        logger.info(f"Additional info - content_type: {content_type}, is_webm: {is_webm}")
+        
+        # Read the audio file content
         audio_content = await audio_file.read()
         
-        logger.info(f"Audio content size: {len(audio_content)} bytes")
+        # Convert sample_rate to int if provided
+        sample_rate_hz = None
+        if sample_rate:
+            try:
+                # FIXED: Properly parse sample_rate as int
+                sample_rate_hz = int(sample_rate)
+                logger.info(f"Using provided sample rate: {sample_rate_hz} Hz")
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid sample_rate value: {sample_rate}, defaulting to None for WebM")
+                sample_rate_hz = None
         
-        if not audio_content:
-            logger.error("Empty audio file received")
-            raise HTTPException(status_code=400, detail="Empty audio file")
-            
-        # Check file size (limit to 10 MB)
-        if len(audio_content) > 10 * 1024 * 1024:
-            logger.error(f"Audio file too large: {len(audio_content)} bytes")
-            raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 10MB")
-            
-        # Check file extension/type to detect if it's a WEBM file
-        file_extension = audio_file.filename.lower().split('.')[-1] if audio_file.filename else ""
-        content_type = audio_file.content_type.lower() if audio_file.content_type else ""
+        # Get content type, if not provided in form use the file's content_type
+        audio_content_type = content_type or audio_file.content_type
+        logger.info(f"Using content type: {audio_content_type}")
+        is_webm = is_webm == 'true' or (audio_content_type and 'webm' in audio_content_type.lower())
         
-        logger.info(f"File extension: {file_extension}, Content-Type: {content_type}")
-       
-        '''
-        # Debug: Save a copy of the audio file for debugging
-        try:
-            debug_filename = f"debug_audio_{client_ip.replace('.', '_')}_{len(audio_content)}.{file_extension or 'bin'}"
-            with open(debug_filename, "wb") as f:
-                f.write(audio_content)
-            logger.info(f"Debug: Saved audio file to {debug_filename}")
-        except Exception as e:
-            logger.warning(f"Could not save debug audio file: {e}")
-        '''
-
-        # For WEBM files, don't specify sample_rate to let Google auto-detect it
-        use_auto_detect = "webm" in file_extension or "webm" in content_type
+        # FIXED: Don't set sample rate for WebM - let the backend extract it from the header
+        if is_webm:
+            logger.info("WebM audio detected, sample rate will be extracted from header")
+            sample_rate_hz = None  # Let the Google API extract it from the WebM header
+        elif not sample_rate_hz:
+            # If not WebM and no sample rate provided, use 16000 Hz as default
+            logger.info("Non-WebM audio with no sample rate, defaulting to 16000 Hz")
+            sample_rate_hz = 16000
         
-        if use_auto_detect:
-            logger.info("WebM audio detected, using auto-detection for sample rate")
-            
-            # For debugging, log the first few bytes of the file
-            if len(audio_content) > 20:
-                header_bytes = " ".join([f"{b:02x}" for b in audio_content[:20]])
-                logger.info(f"WebM file header bytes: {header_bytes}")
-            
-            result = stt_service.transcribe_audio(
-                audio_content=audio_content,
-                sample_rate_hertz=None,  # Let Google auto-detect for WEBM files
-                language_code=language_code
-            )
+        # Validate sample rate only if it's provided (not for WebM files)
+        if sample_rate_hz is not None:
+            # Validate sample rate - Google STT requires specific values
+            # https://cloud.google.com/speech-to-text/docs/reference/rest/v1/RecognitionConfig
+            valid_sample_rates = [8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000]
+            if sample_rate_hz not in valid_sample_rates:
+                logger.warning(f"Sample rate {sample_rate_hz} not in Google STT supported rates: {valid_sample_rates}")
+                # Use closest valid rate
+                sample_rate_hz = min(valid_sample_rates, key=lambda x: abs(x - sample_rate_hz))
+                logger.info(f"Using closest valid sample rate: {sample_rate_hz} Hz")
         else:
-            # For other formats, use the provided sample rate
-            logger.info(f"Non-WebM audio detected, using specified sample rate: {sample_rate}")
-            result = stt_service.transcribe_audio(
-                audio_content=audio_content,
-                sample_rate_hertz=sample_rate,
-                language_code=language_code
-            )
+            logger.info("No sample rate provided - will be extracted from audio header")
         
-        logger.info(f"STT service result: {json.dumps(result, indent=2)}")
+        # IMPORTANT: For WebM/Opus files, always force 48000 Hz as that's the standard for WebM/Opus
+        encoding = None
+        if audio_content_type:
+            if "webm" in audio_content_type.lower():
+                encoding = "WEBM_OPUS"
+                # For WebM with OPUS, always use 48000 Hz (the standard)
+                logger.info("WebM OPUS detected, forcing 48000 Hz as the sample rate")
+                sample_rate_hz = 48000
+            elif "wav" in audio_content_type.lower() or "x-wav" in audio_content_type.lower():
+                encoding = "LINEAR16"
+            elif "ogg" in audio_content_type.lower():
+                encoding = "OGG_OPUS"
+                # For OGG with OPUS, always use 48000 Hz (the standard)
+                logger.info("OGG OPUS detected, forcing 48000 Hz as the sample rate")
+                sample_rate_hz = 48000
+            elif "mp3" in audio_content_type.lower():
+                encoding = "MP3"
+            elif "flac" in audio_content_type.lower():
+                encoding = "FLAC"
+            elif "mulaw" in audio_content_type.lower():
+                encoding = "MULAW"
         
-        if not result.get("success", False) and "error" in result:
-            # Check for sample rate mismatch error
-            error_message = result.get("details", "")
-            status_code = 500
+        # If encoding still not determined, use the file extension
+        if not encoding and audio_file.filename:
+            ext = audio_file.filename.split('.')[-1].lower()
+            if ext == "webm":
+                encoding = "WEBM_OPUS"
+            elif ext == "wav":
+                encoding = "LINEAR16"
+            elif ext == "ogg":
+                encoding = "OGG_OPUS"
+            elif ext == "mp3":
+                encoding = "MP3"
+            elif ext == "flac":
+                encoding = "FLAC"
+        
+        # If still no encoding determined, use LINEAR16 as fallback
+        if not encoding:
+            logger.warning(f"Could not determine encoding from content type: {audio_content_type}, defaulting to LINEAR16")
+            encoding = "LINEAR16"
+        
+        logger.info(f"Using audio encoding: {encoding}, sample rate: {sample_rate_hz} Hz")
+        
+        # Add stack trace before processing
+        stack_trace = traceback.format_stack()
+        logger.info(f"Pre-processing stack trace:\n{''.join(stack_trace)}")
+        
+        # Process the audio
+        result = stt_service.transcribe_audio(
+            audio_content=audio_content,
+            language_code=language_code,
+            sample_rate_hertz=sample_rate_hz,  # FIXED: Pass proper sample rate
+            encoding=encoding,
+            model=model,
+            enhanced=True  # Use enhanced model for better accuracy
+        )
+        
+        # Check for success
+        if result.get("success", False):
+            logger.info(f"STT success: {result.get('transcript', '')[:30]}...")
+            return {
+                "success": True,
+                "transcript": result.get("transcript", ""),
+                "confidence": result.get("confidence", 0)
+            }
+        else:
+            error_msg = result.get("error", "Unknown error")
+            details = result.get("details", "")
             
-            if isinstance(error_message, str) and "sample_rate_hertz" in error_message and "match the value in the" in error_message:
-                status_code = 400
-                result["error"] = "Audio sample rate mismatch. Please try again without specifying sample rate."
-                
-            logger.error(f"STT error (code {status_code}): {result['error']}")
-            logger.error(f"STT error details: {error_message}")
+            # Special case: "No speech detected" should not be a 500 error
+            # Instead, return a successful response with an empty transcript
+            if error_msg == "No speech detected":
+                logger.info("No speech detected, returning empty transcript with success=true")
+                # Process any audio chunks that were sent before this one
+                if 'audio_content' in locals() and len(audio_content) > 0:
+                    first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:20]])
+                    logger.info(f"Audio that triggered 'No speech detected': size={len(audio_content)} bytes, first bytes: {first_few_bytes}")
+                return {
+                    "success": True,
+                    "transcript": "",
+                    "confidence": 0,
+                    "message": "No speech detected"
+                }
+            
+            logger.error(f"STT error (code 500): {error_msg}")
+            if details:
+                logger.error(f"STT error details: {details}")
                 
             return JSONResponse(
-                status_code=status_code,
-                content={"error": result["error"], "details": error_message}
+                status_code=500,
+                content={
+                    "success": False,
+                    "error": error_msg,
+                    "details": details
+                }
             )
             
-        # Sanitize the transcribed text
-        if "transcript" in result:
-            original = result["transcript"]
-            result["transcript"] = sanitize_text(result["transcript"])
-            logger.info(f"Transcript (sanitized): '{result['transcript']}'")
-            if original != result["transcript"]:
-                logger.info(f"Original text was sanitized from: '{original}'")
-            
-        return result
-        
     except Exception as e:
-        # Get stack trace
-        stack_trace = traceback.format_exc()
-        
         logger.error(f"Error in speech-to-text processing: {str(e)}")
-        logger.error(f"Stack trace:\n{stack_trace}")
+        traceback.print_exc()
+        logger.error(traceback.format_exc())
         
-        # Return a more detailed error response
+        # Log audio details for debugging
+        audio_size = len(audio_content) if 'audio_content' in locals() else 0
+        logger.error(f"Audio that caused the error - size: {audio_size} bytes")
+        
+        if audio_content and len(audio_content) > 0:
+            first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:20]])
+            logger.error(f"First few bytes of problematic audio: {first_few_bytes}")
+            
+        # For security, don't return full traceback to client
         return JSONResponse(
             status_code=500,
             content={
-                "error": f"Error processing audio: {str(e)}",
-                "details": stack_trace
+                "success": False,
+                "error": f"Error processing speech-to-text: {str(e)}",
+                "details": "Server encountered an error processing the audio. Please check logs."
             }
         )
 
@@ -154,75 +219,18 @@ async def stt_status():
     return {
         "available": True,
         "api_key_masked": f"{stt_service.api_key[:4]}...{stt_service.api_key[-4:]}" if stt_service.api_key else None,
-        "service_url": stt_service.base_url
+        "service_url": stt_service.base_url,
+        "supported_languages": len(stt_service.supported_languages),
+        "supported_encodings": stt_service.supported_encodings,
+        "supported_sample_rates": [8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000]
     }
 
-@router.post("/speech-to-text/test")
-async def test_stt():
+@router.get("/speech-to-text/languages")
+async def stt_languages():
     """
-    Test the Speech-to-Text service with a simple audio file.
+    Get available STT languages.
     
     Returns:
-        Test result
+        List of available languages and their codes
     """
-    try:
-        # Create a simple test audio file with a beep tone
-        # This is a minimal WAV file containing a sine wave
-        logger.info("Creating test audio file")
-        
-        from scipy.io import wavfile
-        import numpy as np
-        import tempfile
-        
-        # Create a simple sine wave
-        sample_rate = 16000
-        duration = 1  # seconds
-        frequency = 440  # Hz (A4 note)
-        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-        audio_data = (np.sin(2 * np.pi * frequency * t) * 32767).astype(np.int16)
-        
-        # Save to a temporary file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_filename = temp_file.name
-            wavfile.write(temp_filename, sample_rate, audio_data)
-        
-        logger.info(f"Test audio file created at {temp_filename}")
-        
-        # Read the file
-        with open(temp_filename, 'rb') as f:
-            audio_content = f.read()
-        
-        # Send to STT service
-        result = stt_service.transcribe_audio(
-            audio_content=audio_content,
-            sample_rate_hertz=sample_rate,
-            language_code="en-US"
-        )
-        
-        logger.info(f"STT test result: {json.dumps(result, indent=2)}")
-        
-        # Clean up
-        import os
-        os.unlink(temp_filename)
-        
-        return {
-            "test_successful": True,
-            "result": result,
-            "audio_details": {
-                "format": "WAV",
-                "sample_rate": sample_rate,
-                "duration": duration,
-                "frequency": frequency,
-                "file_size": len(audio_content)
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"STT test failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        return {
-            "test_successful": False,
-            "error": str(e),
-            "stack_trace": traceback.format_exc()
-        }
+    return {"languages": stt_service.supported_languages}

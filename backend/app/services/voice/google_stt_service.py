@@ -1,10 +1,11 @@
+# app/services/voice/google_stt_service.py
 import base64
+import json
 import logging
 import os
 import requests
 import traceback
-import json
-from typing import Optional
+from typing import Dict, List, Optional, Any
 
 from app.core.config import settings
 
@@ -16,8 +17,34 @@ class GoogleSTTService:
     def __init__(self):
         self.api_key = self._load_api_key()
         self.base_url = "https://speech.googleapis.com/v1/speech:recognize"
-        logger.info(f"GoogleSTTService initialized. API key available: {bool(self.api_key)}")
         
+        # List of supported encodings
+        self.supported_encodings = [
+            "LINEAR16", "FLAC", "MP3", "WEBM_OPUS", "OGG_OPUS", 
+            "MULAW", "AMR", "AMR_WB", "SPEEX_WITH_HEADER_BYTE"
+        ]
+        
+        # Dict of supported languages
+        self.supported_languages = {
+            "en-US": "English (United States)",
+            "en-GB": "English (United Kingdom)",
+            "en-AU": "English (Australia)",
+            "en-IN": "English (India)",
+            "fr-FR": "French (France)",
+            "es-ES": "Spanish (Spain)",
+            "es-US": "Spanish (United States)",
+            "de-DE": "German (Germany)",
+            "it-IT": "Italian (Italy)",
+            "ja-JP": "Japanese (Japan)",
+            "ko-KR": "Korean (South Korea)",
+            "pt-BR": "Portuguese (Brazil)",
+            "ru-RU": "Russian (Russia)",
+            "zh-CN": "Chinese (Simplified, China)",
+            "zh-TW": "Chinese (Traditional, Taiwan)"
+        }
+        
+        logger.info(f"GoogleSTTService initialized. API key available: {bool(self.api_key)}")
+    
     def _load_api_key(self) -> Optional[str]:
         """Load Google API key from environment."""
         api_key = os.environ.get("GOOGLE_API_KEY")
@@ -58,164 +85,218 @@ class GoogleSTTService:
         logger.info(f"Google API key successfully loaded: {masked_key}")
         return api_key
     
-    def transcribe_audio(self, audio_content: bytes, sample_rate_hertz: Optional[int] = 16000, 
-                     language_code: str = "en-US", model: str = "default") -> dict:
+    def transcribe_audio(
+        self,
+        audio_content: bytes,
+        language_code: str = "en-US",
+        sample_rate_hertz: Optional[int] = None,
+        encoding: str = "WEBM_OPUS",
+        model: str = "default",
+        enhanced: bool = True
+    ) -> dict:
         """
         Transcribe audio using Google's Speech-to-Text API.
         
         Args:
-            audio_content: Raw audio bytes
-            sample_rate_hertz: Audio sample rate in Hertz
-            language_code: Language of the audio
-            model: Model to use (default, command_and_search, phone_call, etc.)
+            audio_content: Audio content bytes
+            language_code: Language code (e.g., 'en-US')
+            sample_rate_hertz: Sample rate in Hz (None to auto-detect, mainly for WebM files)
+            encoding: Audio encoding (WEBM_OPUS, LINEAR16, etc.)
+            model: Model to use (default, phone_call, video, etc.)
+            enhanced: Whether to use enhanced model
             
         Returns:
-            Dictionary containing transcription results or error
+            Dictionary with transcription results
         """
         if not self.api_key:
             logger.error("Cannot transcribe: Google API key not configured")
             return {"success": False, "error": "Google API key not configured"}
         
         try:
-            # Encode audio content to base64
-            audio_base64 = base64.b64encode(audio_content).decode('utf-8')
+            # For WebM files, we don't specify the sample rate (pass None)
+            # For other formats, ensure it's a valid integer
+            if sample_rate_hertz is not None:
+                try:
+                    sample_rate_hertz = int(sample_rate_hertz)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid sample_rate_hertz: {sample_rate_hertz}, defaulting to 16000")
+                    sample_rate_hertz = 16000
+                
+                # Google STT requires specific sample rates
+                valid_sample_rates = [8000, 12000, 16000, 22050, 24000, 32000, 44100, 48000]
+                if sample_rate_hertz not in valid_sample_rates:
+                    logger.warning(f"Sample rate {sample_rate_hertz} not in valid rates: {valid_sample_rates}")
+                    # Use closest valid rate
+                    original_rate = sample_rate_hertz
+                    sample_rate_hertz = min(valid_sample_rates, key=lambda x: abs(x - sample_rate_hertz))
+                    logger.info(f"Adjusted sample rate from {original_rate} to {sample_rate_hertz} Hz")
+            else:
+                logger.info("No sample rate specified - will be extracted from audio header")
+            
+            # Ensure encoding is uppercase and valid
+            encoding = encoding.upper() if encoding else "LINEAR16"
+            valid_encodings = ["LINEAR16", "FLAC", "MP3", "WEBM_OPUS", "OGG_OPUS", "MULAW", "AMR", "AMR_WB"]
+            if encoding not in valid_encodings:
+                logger.warning(f"Encoding {encoding} not in valid encodings: {valid_encodings}")
+                encoding = "LINEAR16"  # Default to LINEAR16
+                logger.info(f"Using fallback encoding: {encoding}")
+            
+            # SPECIAL CASE: For WebM/OPUS encoding, always use 48000 Hz as it's the standard
+            # This ensures compatibility regardless of what the client sends
+            if (encoding == "WEBM_OPUS" or encoding == "OGG_OPUS"):
+                logger.info(f"Forcing 48000 Hz sample rate for {encoding} encoding")
+                sample_rate_hertz = 48000
+            
+            logger.info(f"Transcribing audio: encoding={encoding}, sample_rate={sample_rate_hertz}Hz, language={language_code}")
+            
+            # Prepare request payload
+            payload = {
+                "config": {
+                    "languageCode": language_code,
+                    "encoding": encoding,
+                    "model": model,
+                    "useEnhanced": enhanced,
+                    "enableAutomaticPunctuation": True,
+                    # Add speech context hints to improve recognition
+                    "speechContexts": [{
+                        "phrases": ["question", "help", "information", "support", "problem", "issue"],
+                        "boost": 10
+                    }],
+                    # Enable word-level timestamps
+                    "enableWordTimeOffsets": True
+                },
+                "audio": {
+                    "content": base64.b64encode(audio_content).decode("utf-8")
+                }
+            }
+            
+            # Only include sampleRateHertz if provided (don't include for WebM files)
+            if sample_rate_hertz is not None:
+                payload["config"]["sampleRateHertz"] = sample_rate_hertz
+                
+            # Log the config for debugging
+            logger.debug(f"STT config: {json.dumps(payload['config'])}")
             
             # Construct API URL with key
             url = f"{self.base_url}?key={self.api_key}"
             
-            # Detect if this is WebM audio (usually has a specific header)
-            is_webm = False
-            if len(audio_content) > 4:
-                # Check for WebM header (which typically starts with bytes [0x1A, 0x45, 0xDF, 0xA3])
-                if audio_content[0:4] == b'\x1a\x45\xdf\xa3':
-                    is_webm = True
-                    logger.info("Detected WebM file header")
-                
-            # Choose appropriate encoding based on whether the file appears to be WebM
-            encoding = "WEBM_OPUS" if is_webm else "LINEAR16"
+            # Make API request
+            response = requests.post(url, json=payload)
             
-            # Prepare request payload with optimized settings
-            config = {
-                "encoding": encoding,
-                "languageCode": language_code,
-                "model": model,
-                "enableAutomaticPunctuation": True,
-                "maxAlternatives": 1,
-                # Add some enhancement features
-                "useEnhanced": True,
-                "metadata": {
-                    "interactionType": "DICTATION",
-                    "microphoneDistance": "NEARFIELD",
-                    "recordingDeviceType": "SMARTPHONE"
-                }
-            }
-            
-            # Only include sampleRateHertz if it's provided AND this is not a WebM file
-            # WebM files should use auto-detection
-            if sample_rate_hertz is not None and not is_webm:
-                config["sampleRateHertz"] = sample_rate_hertz
+            # Check for successful response
+            if response.status_code == 200:
+                response_json = response.json()
                 
-            payload = {
-                "config": config,
-                "audio": {
-                    "content": audio_base64
-                }
-            }
-            
-            logger.info(f"Sending audio to Google STT: {len(audio_content)} bytes, format={encoding}")
-            logger.info(f"STT configuration: {json.dumps(config, indent=2)}")
-            
-            try:
-                # Make API request
-                response = requests.post(url, json=payload)
+                logger.debug(f"STT response: {json.dumps(response_json)}")
                 
-                # Log the full response for debugging
-                logger.debug(f"Google STT response code: {response.status_code}")
-                logger.debug(f"Google STT response headers: {dict(response.headers)}")
-                
-                try:
-                    response_json = response.json()
-                    logger.debug(f"Google STT response JSON: {json.dumps(response_json, indent=2)}")
-                except:
-                    logger.warning(f"Google STT response is not JSON: {response.text[:1000]}")
-                
-                # Check for successful response
-                if response.status_code == 200:
-                    response_json = response.json()
-                    
-                    # Extract transcript text if available
-                    result = {"success": True}
-                    
-                    if ("results" in response_json and 
-                        response_json["results"] and 
-                        response_json["results"][0].get("alternatives") and 
-                        response_json["results"][0]["alternatives"][0].get("transcript")):
+                # Extract transcription result
+                if "results" in response_json and response_json["results"]:
+                    # Get the top alternative from the first result
+                    first_result = response_json["results"][0]
+                    if "alternatives" in first_result and first_result["alternatives"]:
+                        top_alternative = first_result["alternatives"][0]
                         
-                        transcript = response_json["results"][0]["alternatives"][0]["transcript"]
-                        confidence = response_json["results"][0]["alternatives"][0].get("confidence", 0)
+                        transcript = top_alternative.get("transcript", "")
+                        confidence = top_alternative.get("confidence", 0)
                         
-                        result["transcript"] = transcript
-                        result["confidence"] = confidence
-                        result["full_response"] = response_json
-                        logger.info(f"Speech recognition successful: '{transcript}' (confidence: {confidence})")
+                        return {
+                            "success": True,
+                            "transcript": transcript,
+                            "confidence": confidence
+                        }
                     else:
-                        # Check for the "no speech detected" case
-                        # This happens when Google receives valid audio but doesn't detect speech
-                        if "results" in response_json and not response_json["results"]:
-                            logger.warning("Google STT returned empty results - no speech detected")
-                            result["success"] = False
-                            result["error"] = "No speech detected" 
-                            result["details"] = "The audio file didn't contain any recognizable speech"
-                        # Check for the special case with just totalBilledTime and requestId
-                        elif "totalBilledTime" in response_json and "requestId" in response_json:
-                            logger.warning(f"No speech detected response: {json.dumps(response_json, indent=2)}")
-                            result["success"] = False
-                            result["error"] = "No speech detected"
-                            result["details"] = "The audio was processed but no speech was recognized"
-                        else:
-                            # Some other unexpected response structure
-                            logger.warning(f"Google STT returned unexpected response structure: {json.dumps(response_json, indent=2)}")
-                            stack_trace = traceback.format_stack()
-                            logger.warning(f"Stack trace:\n{''.join(stack_trace)}")
-                            
-                            result["success"] = False
-                            result["error"] = "Unexpected API response"
-                            result["details"] = f"Response structure: {json.dumps(response_json, indent=2)}"
-                        
-                        result["transcript"] = ""
-                        result["confidence"] = 0
-                        result["full_response"] = response_json
-                        
-                    return result
-                else:
-                    logger.error(f"Google STT API error: {response.status_code} - {response.text}")
-                    stack_trace = traceback.format_stack()
-                    logger.error(f"Stack trace:\n{''.join(stack_trace)}")
+                        logger.warning("No alternatives found in response")
+                elif "totalBilledTime" in response_json:
+                    # This is a special case where Google STT returned a billable result
+                    # but no transcription (likely no speech detected)
                     
-                    return {
+                    # Add stack trace for debugging
+                    stack_trace = traceback.format_stack()
+                    logger.warning(f"No speech detected response: {json.dumps(response_json)}")
+                    logger.warning(f"No speech stack trace:\n{''.join(stack_trace)}")
+                    
+                    # Get the audio size and log it for debugging
+                    audio_size = len(audio_content) if audio_content else 0
+                    logger.warning(f"Audio size: {audio_size} bytes, encoding: {encoding}, sample_rate: {sample_rate_hertz}")
+                    
+                    # Add more debugging info about the audio content
+                    if audio_content and len(audio_content) > 0:
+                        first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:20]])
+                        logger.warning(f"First few bytes of audio: {first_few_bytes}")
+                    
+                    # Track no-speech detection events with more detailed info
+                    no_speech_result = {
                         "success": False,
-                        "error": f"API request failed with status {response.status_code}",
-                        "details": response.text
+                        "error": "No speech detected",
+                        "details": "The audio was processed but no speech was recognized",
+                        "audio_info": {
+                            "size_bytes": audio_size,
+                            "encoding": encoding,
+                            "sample_rate": sample_rate_hertz,
+                            "api_response": response_json  # Include the actual API response for debugging
+                        }
                     }
                     
-            except Exception as e:
-                logger.error(f"Exception in Google STT API request: {str(e)}")
-                stack_trace = traceback.format_exc()
-                logger.error(f"Stack trace:\n{stack_trace}")
+                    # If audio is too small, provide a more specific error message
+                    if audio_size < 4000:
+                        no_speech_result["details"] += ". The audio sample may be too short or empty."
+                    elif audio_size > 1000000:
+                        no_speech_result["details"] += ". The audio sample is very large - check for encoding issues."
+                    
+                    # Log the content type and first few bytes for debugging
+                    first_few_bytes = ', '.join([f'{b:02x}' for b in audio_content[:min(40, len(audio_content))]])
+                    logger.warning(f"No speech detected in audio with first bytes: {first_few_bytes}")
+                    
+                    return no_speech_result
+                else:
+                    logger.warning(f"No results found in response: {json.dumps(response_json)}")
                 
                 return {
                     "success": False,
-                    "error": f"Exception in API request: {str(e)}",
-                    "details": traceback.format_exc()
+                    "error": "No transcription result",
+                    "details": "The API processed the audio but did not return any transcription"
+                }
+            else:
+                error_message = "Unknown error"
+                try:
+                    error_data = response.json()
+                    if "error" in error_data:
+                        error_message = error_data["error"].get("message", "Unknown error")
+                        logger.error(f"Google STT API error: {response.status_code} - {json.dumps(error_data)}")
+                except:
+                    error_message = response.text
+                    
+                logger.error(f"Google STT API error: {response.status_code} - {error_message}")
+                
+                stack_trace = traceback.format_stack()
+                logger.error(f"Stack trace:\n{''.join(stack_trace)}")
+                
+                return {
+                    "success": False,
+                    "error": f"API request failed with status {response.status_code}",
+                    "details": error_message
                 }
                 
         except Exception as e:
             logger.error(f"Exception in Google STT service: {str(e)}")
-            stack_trace = traceback.format_exc()
-            logger.error(f"Stack trace:\n{stack_trace}")
+            logger.error(traceback.format_exc())
             
             return {
                 "success": False,
                 "error": f"Exception: {str(e)}",
                 "details": traceback.format_exc()
             }
+    
+    def get_supported_languages(self) -> List[Dict[str, str]]:
+        """Get a list of supported languages."""
+        return [
+            {"code": code, "name": name} 
+            for code, name in self.supported_languages.items()
+        ]
+    
+    def get_supported_encodings(self) -> List[str]:
+        """Get a list of supported audio encodings."""
+        return self.supported_encodings
+
+# Create a singleton instance of the service
+stt_service = GoogleSTTService()

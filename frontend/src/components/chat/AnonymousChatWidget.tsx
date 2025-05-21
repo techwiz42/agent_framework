@@ -44,6 +44,11 @@ export const AnonymousChatWidget: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('');
   
+  // Continuous STT states
+  const [isContinuousListening, setIsContinuousListening] = useState(false);
+  const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null);
+  const [audioProcessorInterval, setAudioProcessorInterval] = useState<NodeJS.Timeout | null>(null);
+  
   // Text-to-speech states
   const [isTtsEnabled, setIsTtsEnabled] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
@@ -151,7 +156,9 @@ export const AnonymousChatWidget: React.FC = () => {
             setMessages(prev => {
               const lastMessage = prev[prev.length - 1];
               
+              // Check if the last message is an agent message that's still being streamed
               if (lastMessage && lastMessage.sender === 'agent' && !lastMessage.id.includes('complete')) {
+                // Update existing message with new token
                 const updatedMessages = [...prev];
                 updatedMessages[updatedMessages.length - 1] = {
                   ...lastMessage,
@@ -159,8 +166,10 @@ export const AnonymousChatWidget: React.FC = () => {
                 };
                 return updatedMessages;
               } else {
+                // Create a new streaming message with a temporary ID
+                const streamingId = `streaming-${Date.now()}`; // Use timestamp instead of UUID
                 return [...prev, {
-                  id: `streaming-${uuidv4()}`,
+                  id: streamingId,
                   content: data.token,
                   sender: 'agent' as const,
                   timestamp: new Date(),
@@ -353,12 +362,33 @@ export const AnonymousChatWidget: React.FC = () => {
         audioPlayerRef.current.pause();
         audioPlayerRef.current = null;
       }
+      
+      // Add cleanup for continuous listening
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+      }
+      
+      if (audioProcessorInterval) {
+        clearInterval(audioProcessorInterval);
+      }
+      
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+        if (mediaRecorderRef.current.stream) {
+          mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        }
+      }
     };
   }, []);
 
   // Handle sending a message
   const handleSendMessage = () => {
     if (!inputValue.trim()) return;
+    
+    // If continuous listening is active, stop it
+    if (isContinuousListening) {
+      stopContinuousListening();
+    }
     
     console.log('Attempting to send message:', inputValue);
     
@@ -449,7 +479,342 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   };
   
-  // Speech-to-text functions
+  // Toggle continuous listening
+  const toggleContinuousListening = () => {
+    if (isContinuousListening) {
+      stopContinuousListening();
+    } else {
+      startContinuousListening();
+    }
+  };
+  
+  // Start continuous listening
+  const startContinuousListening = async () => {
+    try {
+      setRecordingStatus('Requesting microphone access...');
+      
+      // Check if mediaDevices is supported
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error('Browser does not support mediaDevices API');
+        throw new Error('Browser does not support microphone access');
+      }
+      
+      // FIXED: Use explicit sampleRate constraint that is compatible with Google STT
+      const constraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000  // Increased to 48kHz for better compatibility with WebM/Opus
+        }
+      };
+      
+      console.log('Requesting microphone access for continuous listening...');
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      if (stream.getAudioTracks().length === 0) {
+        throw new Error('No audio tracks found in the media stream');
+      }
+      
+      // FIXED: Log actual audio track settings to verify sample rate
+      const audioTrack = stream.getAudioTracks()[0];
+      const trackSettings = audioTrack.getSettings();
+      console.log('Actual audio settings:', trackSettings);
+      // Some browsers may not honor the requested sample rate, so log what we got
+      console.log(`Actual sample rate: ${trackSettings.sampleRate}, requested: 16000`);
+      
+      // Use the best format for Google STT - prefer WEBM with Opus codec
+      let mimeType = 'audio/webm;codecs=opus';
+      
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        const supportedMimeTypes = [
+          'audio/webm',
+          'audio/ogg;codecs=opus',
+          'audio/wav',
+          'audio/mp4'
+        ];
+        
+        for (const type of supportedMimeTypes) {
+          if (MediaRecorder.isTypeSupported(type)) {
+            mimeType = type;
+            console.log(`Fallback to supported MIME type: ${mimeType}`);
+            break;
+          }
+        }
+      }
+      
+      // Use much higher audioBitsPerSecond for better audio quality
+      const options = { 
+        mimeType,
+        audioBitsPerSecond: 256000  // Doubled bitrate for clearer audio
+      };
+      
+      console.log('Creating MediaRecorder with options:', options);
+      const mediaRecorder = new MediaRecorder(stream, options);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      
+      // Set up silence detection using AudioContext
+      const audioContext = new AudioContext();
+      const audioSource = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      audioSource.connect(analyser);
+      
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      
+      // Function to detect if audio is silent
+      const detectSilence = () => {
+        analyser.getByteFrequencyData(dataArray);
+        
+        // Calculate average volume
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        
+        // Track silent frames for more reliable silence detection
+        if (!window.silentFrameCount) {
+          window.silentFrameCount = 0;
+          window.speakingFrameCount = 0;
+        }
+        
+        // Lower threshold for detecting actual sound (was 15)
+        const isSilent = average < 10;
+        
+        if (isSilent) {
+          window.silentFrameCount++;
+          window.speakingFrameCount = 0;
+          
+          // Process audio after 20 consecutive silent frames (about 2 seconds)
+          // but only if we've accumulated some audio chunks first
+          if (window.silentFrameCount >= 20 && silenceTimer === null && audioChunksRef.current.length > 0) {
+            console.log(`Detected ${window.silentFrameCount} silent frames, processing audio...`);
+            
+            // Force process immediately to avoid losing context between utterances
+            processContinuousAudio();
+            window.silentFrameCount = 0;
+            
+            // Also set a marker that we just processed audio, to avoid double-processing
+            window.justProcessedAudio = true;
+            setTimeout(() => {
+              window.justProcessedAudio = false;
+            }, 1000);
+          }
+        } else {
+          window.speakingFrameCount++;
+          window.silentFrameCount = 0;
+          
+          // Force process after 60 consecutive speaking frames (about 6 seconds)
+          // This ensures long monologues get processed in chunks
+          if (window.speakingFrameCount >= 60 && audioChunksRef.current.length >= 10 && !window.justProcessedAudio) {
+            console.log(`Detected ${window.speakingFrameCount} speaking frames, force processing audio...`);
+            processContinuousAudio();
+            window.speakingFrameCount = 0;
+            
+            // Set a marker that we just processed audio
+            window.justProcessedAudio = true;
+            setTimeout(() => {
+              window.justProcessedAudio = false;
+            }, 1000);
+          }
+          
+          // If we detect sound, clear any pending silence timer
+          if (silenceTimer !== null) {
+            clearTimeout(silenceTimer);
+            setSilenceTimer(null);
+          }
+        }
+        
+        // Log volume levels occasionally for debugging
+        if (Math.random() < 0.01) { // Log roughly 1% of the time
+          console.log(`Audio level: ${average.toFixed(2)}, silent: ${isSilent}, ` +
+                      `silent frames: ${window.silentFrameCount}, speaking frames: ${window.speakingFrameCount}`);
+        }
+      };
+      
+      // Set up interval to periodically check for silence
+      const processorInterval = setInterval(detectSilence, 100);
+      setAudioProcessorInterval(processorInterval);
+      
+      // Event handler for data available
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          // FIXED: Log data for debugging
+          console.log(`Received audio chunk: ${event.data.size} bytes, type: ${event.data.type}`);
+        }
+      };
+      
+      // Process with larger chunks for better audio quality
+      mediaRecorder.start(1000); // Collect data every 1000ms to get more substantial audio chunks
+      setIsContinuousListening(true);
+      setRecordingStatus('Listening... Speak and I\'ll transcribe your words');
+      
+    } catch (error: any) {
+      console.error('Error starting continuous listening:', error);
+      setIsContinuousListening(false);
+      
+      // Handle error cases
+      if (error.name === 'NotAllowedError') {
+        setRecordingStatus('Microphone access denied. Please check your browser permissions.');
+      } else if (error.name === 'NotFoundError') {
+        setRecordingStatus('No microphone found. Please connect a microphone and try again.');
+      } else if (error.name === 'NotReadableError' || error.name === 'AbortError') {
+        setRecordingStatus('Cannot access microphone. It may be in use by another application.');
+      } else if (error.message) {
+        setRecordingStatus(`Error: ${error.message}`);
+      } else {
+        setRecordingStatus('Failed to access microphone');
+      }
+      
+      setTimeout(() => {
+        setRecordingStatus('');
+      }, 5000);
+    }
+  };
+  
+  // Process continuous audio
+  const processContinuousAudio = async () => {
+    if (!mediaRecorderRef.current || audioChunksRef.current.length === 0) {
+      return;
+    }
+    
+    try {
+      // Create a blob from the recorded audio chunks
+      const mimeType = mediaRecorderRef.current.mimeType;
+      const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+      
+      if (audioBlob.size < 4000) {
+        // Audio is too small, likely no speech or too short for recognition
+        // Don't waste API calls on tiny audio pieces
+        console.log(`Audio too small (${audioBlob.size} bytes), skipping processing`);
+        audioChunksRef.current = []; // Clear chunks for next segment
+        return;
+      }
+      
+      // Log detailed audio info for debugging
+      console.log(`Processing audio: size=${audioBlob.size} bytes, type=${mimeType}`);
+      console.log(`Chunk count: ${audioChunksRef.current.length}, average chunk size: ${audioBlob.size/audioChunksRef.current.length} bytes`);
+      
+      // Update status
+      setRecordingStatus('Processing audio...');
+      
+      // Store the current chunks and clear for the next round of recording
+      // This is critical for continuous listening so we don't lose audio while processing
+      const currentChunks = [...audioChunksRef.current];
+      audioChunksRef.current = []; // Clear chunks immediately so new audio can be recorded
+      
+      // Send the audio blob to the backend for STT
+      const fileName = `recording_${Date.now()}.${mimeType.split('/')[1] || 'webm'}`;
+      const formData = new FormData();
+      formData.append('audio_file', audioBlob, fileName);
+      formData.append('language_code', 'en-US');
+      
+      // Always send sample rate information
+      // For WebM/Opus, use 48000 Hz as the standard (this is the most important fix)
+      if (mimeType.includes('webm') || mimeType.includes('opus')) {
+        formData.append('sample_rate', '48000');
+      } else {
+        formData.append('sample_rate', '16000');
+      }
+      
+      // Add additional parameters to improve STT performance
+      formData.append('model', 'default'); // Use default model which works best for short command-style speech
+      
+      // Include these extra parameters to help backend debugging
+      formData.append('content_type', mimeType);
+      formData.append('is_webm', mimeType.includes('webm') ? 'true' : 'false');
+      
+      const apiUrl = `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`;
+      
+      console.log(`Sending audio for processing: ${audioBlob.size} bytes, ${currentChunks.length} chunks`);
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Server error:', response.status, errorText);
+        throw new Error(`Server responded with status ${response.status}: ${errorText}`);
+      }
+      
+      const data = await response.json();
+      console.log('STT response:', data);
+      
+      if (data.success) {
+        if (data.transcript) {
+          // Append transcribed text to the input value with proper spacing
+          const transcript = data.transcript.trim();
+          if (transcript) {
+            console.log('Got transcript:', transcript);
+            setInputValue(prev => {
+              // Ensure proper spacing between existing text and new transcription
+              if (!prev) return transcript;
+              const needsSpace = !prev.endsWith(' ') && !transcript.startsWith(' ');
+              return prev + (needsSpace ? ' ' : '') + transcript;
+            });
+          }
+        } else if (data.message === "No speech detected") {
+          // No speech detected but handled gracefully
+          console.log('No speech detected in continuous mode, but handled gracefully');
+        }
+        
+        // Continue listening in all success cases
+        setRecordingStatus('Listening... Speak and I\'ll transcribe your words');
+      } else if (data.error) {
+        console.log('STT error, but continuing to listen:', data.error);
+        // Don't show error, just keep listening
+        setRecordingStatus('Listening... Speak and I\'ll transcribe your words');
+      }
+      
+    } catch (error) {
+      console.error('Error processing audio segment:', error);
+      // Continue listening even if there was an error
+      setRecordingStatus('Listening... Speak and I\'ll transcribe your words');
+    }
+  };
+  
+  // Stop continuous listening
+  const stopContinuousListening = () => {
+    // Clear timers and intervals
+    if (silenceTimer) {
+      clearTimeout(silenceTimer);
+      setSilenceTimer(null);
+    }
+    
+    if (audioProcessorInterval) {
+      clearInterval(audioProcessorInterval);
+      setAudioProcessorInterval(null);
+    }
+    
+    // Stop media recorder if active
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+    
+    // Stop audio tracks
+    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    
+    // Process any remaining audio if it's substantial enough
+    if (audioChunksRef.current.length > 3) { // Only process if we have enough chunks
+      processContinuousAudio();
+    } else if (audioChunksRef.current.length > 0) {
+      console.log(`Not enough audio chunks (${audioChunksRef.current.length}), discarding`);
+      audioChunksRef.current = []; // Clean up any partial chunks
+    }
+    
+    setIsContinuousListening(false);
+    setRecordingStatus('');
+  };
+  
+  // Regular (non-continuous) STT functions
   const startRecording = async () => {
     try {
       setRecordingStatus('Requesting microphone access...');
@@ -471,7 +836,7 @@ export const AnonymousChatWidget: React.FC = () => {
           noiseSuppression: true,
           autoGainControl: true,
           channelCount: 1,         // Mono audio
-          sampleRate: 16000        // 16 kHz sample rate (Google STT preferred)
+          sampleRate: 48000        // 48 kHz sample rate for better quality with WebM/Opus
         }
       };
       
@@ -517,7 +882,7 @@ export const AnonymousChatWidget: React.FC = () => {
       // Create MediaRecorder with options
       const options = { 
         mimeType,
-        audioBitsPerSecond: 16000  // Match Google STT expectations
+        audioBitsPerSecond: 128000  // Higher bitrate for better audio quality
       };
       console.log('Creating MediaRecorder with options:', options);
       const mediaRecorder = new MediaRecorder(stream, options);
@@ -660,19 +1025,19 @@ export const AnonymousChatWidget: React.FC = () => {
       // Default language code
       formData.append('language_code', 'en-US');
       
-      // Explicitly set the encoding to match what we're sending
-      // This helps Google STT know how to process the audio
-      if (audioBlob.type.includes('webm')) {
-        // WebM uses Opus codec, which is supported by Google STT
-        console.log('Using WEBM audio format');
+      // Always send sample rate information
+      // For WebM/Opus, use 48000 Hz as the standard
+      if (audioBlob.type.includes('webm') || audioBlob.type.includes('opus')) {
+        formData.append('sample_rate', '48000');
       } else {
-        // If not using WebM, we should specify the sample rate
-        // as it might not be included in the audio metadata
-        console.log('Using non-WEBM audio format, adding sample rate');
         formData.append('sample_rate', '16000');
       }
       
-      // Use the correct API URL that we know works
+      // FIXED: Include content type information
+      formData.append('content_type', audioBlob.type);
+      formData.append('is_webm', audioBlob.type.includes('webm') ? 'true' : 'false');
+      
+      // Use the correct API URL
       const apiUrl = `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`;
       
       console.log('Sending fetch request with FormData');
@@ -692,26 +1057,45 @@ export const AnonymousChatWidget: React.FC = () => {
       const data = await response.json();
       console.log('STT response data:', data);
       
-      if (data.success && data.transcript) {
-        // Set the transcribed text as the input value
-        console.log('Setting transcript:', data.transcript);
-        setInputValue(prev => prev + (prev ? ' ' : '') + data.transcript);
-        setRecordingStatus('');
+      if (data.success) {
+        if (data.transcript) {
+          // Set the transcribed text as the input value
+          console.log('Setting transcript:', data.transcript);
+          setInputValue(prev => prev + (prev ? ' ' : '') + data.transcript);
+          setRecordingStatus('');
+        } else if (data.message === "No speech detected") {
+          // Handle the "No speech detected" case - now this comes back as a success response with empty transcript
+          console.log('No speech detected, but handled gracefully');
+          
+          if (isContinuousListening) {
+            // Try again with continuous mode
+            setRecordingStatus('Didn\'t catch that. Please speak louder or try again.');
+            
+            // Don't clear the audio chunks immediately to allow for more audio to be collected
+            setTimeout(() => {
+              audioChunksRef.current = [];
+            }, 1000);
+            
+            return; // Don't show the error message for too long in continuous mode
+          } else {
+            setRecordingStatus('No speech detected. Please try again and speak clearly.');
+          }
+        } else {
+          // Success but no transcript (should never happen)
+          setRecordingStatus('');
+        }
       } else if (data.error) {
         console.error('STT error:', data.error, data.details || '');
         
         // Check for common Google STT errors
         if (data.details && typeof data.details === 'string' && data.details.includes('sample_rate_hertz')) {
           setRecordingStatus('Audio format error: sample rate mismatch. Trying again may help.');
-        } else if (data.error.includes('No speech detected')) {
-          setRecordingStatus('No speech detected. Please try again and speak clearly.');
         } else if (data.error.includes('Unexpected API response')) {
           setRecordingStatus('Speech recognition service error. This could be a temporary issue with Google STT.');
         } else {
           setRecordingStatus(`Error: ${data.error}`);
         }
         
-        // Clear error status after a few seconds
         setTimeout(() => {
           setRecordingStatus('');
         }, 8000);
@@ -719,7 +1103,6 @@ export const AnonymousChatWidget: React.FC = () => {
         console.log('No transcript found in response');
         setRecordingStatus('No speech detected or recognized. Please try again and speak clearly.');
         
-        // Clear status after a few seconds
         setTimeout(() => {
           setRecordingStatus('');
         }, 5000);
@@ -727,7 +1110,6 @@ export const AnonymousChatWidget: React.FC = () => {
     } catch (error: any) {
       console.error('Error sending audio for STT:', error);
       
-      // Provide more user-friendly error message
       if (error.message && error.message.includes('Failed to fetch')) {
         setRecordingStatus('Network error: Cannot connect to API server');
       } else if (error.message) {
@@ -736,7 +1118,6 @@ export const AnonymousChatWidget: React.FC = () => {
         setRecordingStatus('Failed to process speech');
       }
       
-      // Clear error status after a few seconds
       setTimeout(() => {
         setRecordingStatus('');
       }, 5000);
@@ -823,8 +1204,22 @@ export const AnonymousChatWidget: React.FC = () => {
           </div>
         </div>
         
-        {/* Text-to-speech toggle */}
-        <div className="ml-auto mr-2">
+        {/* Buttons group */}
+        <div className="flex items-center gap-2 ml-auto">
+          {/* Microphone (STT) toggle for continuous listening */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-white hover:bg-blue-700 rounded-full"
+            onClick={toggleContinuousListening}
+            aria-label={isContinuousListening ? "Stop listening" : "Start listening"}
+          >
+            {isContinuousListening ? 
+              <MicOff size={16} className="text-red-400 animate-pulse" /> : 
+              <Mic size={16} />}
+          </Button>
+
+          {/* Text-to-speech toggle */}
           <Toggle
             aria-label="Toggle text-to-speech"
             pressed={isTtsEnabled}
@@ -834,20 +1229,21 @@ export const AnonymousChatWidget: React.FC = () => {
                 stopAudioPlayback();
               }
             }}
+            className="mr-2"
           >
             {isTtsEnabled ? 
               <Volume2 size={16} className={isPlayingAudio ? 'text-green-400 animate-pulse' : ''} /> : 
               <VolumeX size={16} />
             }
           </Toggle>
-        </div>
-        
-        <div className="flex gap-2">
+          
+          {/* Window controls */}
           <Button 
             variant="ghost" 
             size="icon" 
             className="h-8 w-8 text-white hover:bg-blue-700 rounded-full"
             onClick={toggleMinimize}
+            aria-label="Minimize chat"
           >
             <Minimize2 size={16} />
           </Button>
@@ -856,6 +1252,7 @@ export const AnonymousChatWidget: React.FC = () => {
             size="icon" 
             className="h-8 w-8 text-white hover:bg-blue-700 rounded-full"
             onClick={toggleChat}
+            aria-label="Close chat"
           >
             <X size={16} />
           </Button>
@@ -914,19 +1311,9 @@ export const AnonymousChatWidget: React.FC = () => {
         )}
         
         <div className="flex gap-2 items-center">
-          <Button
-            variant={isRecording ? "destructive" : "outline"}
-            size="icon"
-            onClick={isRecording ? stopRecording : startRecording}
-            className={isRecording ? "bg-red-500 hover:bg-red-600 text-white" : ""}
-            aria-label={isRecording ? "Stop recording" : "Start recording"}
-          >
-            {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
-          </Button>
-          
           <Input
             className="flex-1"
-            placeholder="Type your message..."
+            placeholder={isContinuousListening ? "Listening... speak and I'll transcribe" : "Type your message..."}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
