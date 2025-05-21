@@ -48,9 +48,20 @@ export const AnonymousChatWidget: React.FC = () => {
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-
+  const messageBeingBuiltRef = useRef<boolean>(false);
+  const fullMessageRef = useRef<string>('');  // Track the full message as it's built
+  
+  // Buffer to accumulate text for speech
+  const speechBufferRef = useRef<string>('');
+  const lastSpeechTimeRef = useRef<number>(0);
+  const bufferTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Sentence boundary punctuation for better speech segmentation
+  const sentenceEndingPunctuation = ['.', '!', '?', ':', ';', '\n'];
+  
   // Initialize speech to text service with callbacks
   const stt = useSpeechToText({
+    sampleRate: 48000,
     onTranscription: (text) => {
       setInputValue(prev => {
         // Ensure proper spacing between existing text and new transcription
@@ -61,8 +72,97 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   });
 
-  // Initialize text to speech service with enabled by default
-  const tts = useTextToSpeech();
+  // Initialize text to speech service
+  const tts = useTextToSpeech({
+    // Enable text preprocessing in the TTS service
+    preprocessText: true,
+    onPlaybackStart: () => {
+      console.log("TTS playback started");
+    },
+    onPlaybackEnd: () => {
+      console.log("TTS playback ended");
+      // We've finished speaking, try to process more text if available
+      processSpeechBuffer();
+    },
+    onPlaybackError: (error) => {
+      console.error("TTS playback error:", error);
+      // Try to continue with the next segment on error
+      processSpeechBuffer();
+    }
+  });
+  
+  // Process and speak text from the speech buffer
+  const processSpeechBuffer = () => {
+    if (!tts.isEnabled || tts.isPlaying) return;
+    
+    // If we have accumulated text in the buffer
+    if (speechBufferRef.current.length > 0) {
+      // Only speak if we have meaningful text
+      if (speechBufferRef.current.trim().length > 0) {
+        console.log("Speaking buffer:", speechBufferRef.current.substring(0, 50) + (speechBufferRef.current.length > 50 ? '...' : ''));
+        tts.playAudio(speechBufferRef.current);
+      }
+      
+      // Clear the buffer after speaking
+      speechBufferRef.current = '';
+    }
+  };
+  
+  // Add text to the speech buffer and process when appropriate
+  const addToSpeechBuffer = (text: string) => {
+    if (!tts.isEnabled) return;
+    
+    // Add new text to buffer
+    speechBufferRef.current += text;
+    
+    // Clear any existing timeout
+    if (bufferTimeoutRef.current) {
+      clearTimeout(bufferTimeoutRef.current);
+      bufferTimeoutRef.current = null;
+    }
+    
+    // Check if buffer contains full sentences or significant content
+    const hasCompleteSentence = sentenceEndingPunctuation.some(punct => 
+      speechBufferRef.current.includes(punct));
+    
+    // Process immediately if:
+    // 1. We have a complete sentence, OR
+    // 2. It's been more than 1 second since last speech, OR
+    // 3. We have a substantial amount of text (over 60 chars)
+    const now = Date.now();
+    if (hasCompleteSentence || 
+        now - lastSpeechTimeRef.current > 1000 || 
+        speechBufferRef.current.length > 60) {
+      
+      // If not currently speaking, process the buffer
+      if (!tts.isPlaying) {
+        processSpeechBuffer();
+        lastSpeechTimeRef.current = now;
+      }
+    } else {
+      // Set a timeout to process the buffer after a short delay
+      // This ensures that we'll speak even if we don't get a complete sentence
+      bufferTimeoutRef.current = setTimeout(() => {
+        if (!tts.isPlaying && speechBufferRef.current.length > 0) {
+          processSpeechBuffer();
+          lastSpeechTimeRef.current = Date.now();
+        }
+      }, 500);
+    }
+  };
+  
+  // Speak a complete message immediately
+  const speakCompleteMessage = (message: string) => {
+    if (!tts.isEnabled) return;
+    
+    // Stop any current speech
+    tts.stopAudio();
+    speechBufferRef.current = '';
+    
+    // Speak the full message
+    console.log("Speaking complete message:", message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+    tts.playAudio(message);
+  };
   
   // Enable TTS by default
   useEffect(() => {
@@ -110,9 +210,10 @@ export const AnonymousChatWidget: React.FC = () => {
             agentType: agentType
           }]);
           
-          // Always play welcome message
-          tts.setEnabled(true);
-          tts.playAudio(welcomeMessage);
+          // Speak the welcome message
+          if (tts.isEnabled) {
+            speakCompleteMessage(welcomeMessage);
+          }
         } else {
           // For reconnections, add a different message
           const reconnectMessage = "I'm connected again. How can I help you?";
@@ -125,64 +226,110 @@ export const AnonymousChatWidget: React.FC = () => {
             agentType: agentType
           }]);
           
-          // Always play reconnection message
-          tts.setEnabled(true);
-          tts.playAudio(reconnectMessage);
+          // Speak the reconnection message
+          if (tts.isEnabled) {
+            speakCompleteMessage(reconnectMessage);
+          }
         }
       };
       
       ws.onmessage = (event) => {
         try {
+          // Check for non-JSON messages
+          if (typeof event.data === 'string' && (event.data === 'ping' || event.data.trim() === 'ping')) {
+            ws.send('pong');
+            return;
+          }
+          
           console.log('WebSocket message received:', event.data);
-          const data = JSON.parse(event.data);
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch (e) {
+            console.error('Error parsing message as JSON:', e);
+            return;
+          }
           
           if (data.type === 'message') {
+            // Complete message from agent - rare case as it usually comes token by token
+            const messageContent = formatAgentResponse(data.content);
+            
+            // Reset the message building state
+            messageBeingBuiltRef.current = false;
+            fullMessageRef.current = '';
+            speechBufferRef.current = '';
+            
+            // Create a new message
             const newMessage = {
               id: data.id || uuidv4(),
-              content: formatAgentResponse(data.content),
+              content: messageContent,
               sender: 'agent' as const,
-              timestamp: new Date(data.timestamp),
+              timestamp: new Date(data.timestamp || new Date()),
               agentType: data.agent_type || agentType
             };
             
             setMessages(prev => [...prev, newMessage]);
             setIsTyping(false);
             
-            // Always play TTS for complete messages to fix the "no tts at all" issue
-            // Stop any currently playing audio before starting new
-            tts.stopAudio();
-            
-            // Ensure TTS is enabled and then play without delay
-            tts.setEnabled(true);
-            tts.playAudio(data.content);
+            // Play the entire message via TTS
+            if (tts.isEnabled) {
+              speakCompleteMessage(messageContent);
+            }
           } else if (data.type === 'token') {
-            // Handle streaming tokens (no TTS for streaming since we wait for complete messages)
-            setMessages(prev => {
-              const lastMessage = prev[prev.length - 1];
+            // Handle streaming tokens
+            const token = data.token || '';
+            
+            // Add to the full message
+            fullMessageRef.current += token;
+            
+            // If this is the first token of a new message
+            if (!messageBeingBuiltRef.current) {
+              messageBeingBuiltRef.current = true;
               
-              // Check if the last message is an agent message that's still being streamed
-              if (lastMessage && lastMessage.sender === 'agent' && !lastMessage.id.includes('complete')) {
-                // Update existing message with new token
+              // Add a new streaming message
+              setMessages(prev => [...prev, {
+                id: uuidv4(),
+                content: token,
+                sender: 'agent' as const,
+                timestamp: new Date(),
+                agentType: agentType
+              }]);
+              
+              // Start buffering speech
+              addToSpeechBuffer(token);
+            } else {
+              // Update the last message with the accumulated tokens
+              setMessages(prev => {
                 const updatedMessages = [...prev];
-                updatedMessages[updatedMessages.length - 1] = {
-                  ...lastMessage,
-                  content: formatAgentResponse(lastMessage.content + data.token)
-                };
+                if (updatedMessages.length > 0) {
+                  const lastIndex = updatedMessages.length - 1;
+                  if (updatedMessages[lastIndex].sender === 'agent') {
+                    updatedMessages[lastIndex] = {
+                      ...updatedMessages[lastIndex],
+                      content: fullMessageRef.current
+                    };
+                  }
+                }
                 return updatedMessages;
-              } else {
-                // Create a new streaming message with a temporary ID
-                const streamingId = `streaming-${Date.now()}`; // Use timestamp instead of UUID
-                return [...prev, {
-                  id: streamingId,
-                  content: data.token,
-                  sender: 'agent' as const,
-                  timestamp: new Date(),
-                  agentType: agentType
-                }];
-              }
-            });
+              });
+              
+              // Add to speech buffer
+              addToSpeechBuffer(token);
+            }
           } else if (data.type === 'typing_status') {
+            // Agent typing indicator
             setIsTyping(data.is_typing);
+            
+            // If agent stops typing and we were building a message, wrap it up
+            if (!data.is_typing && messageBeingBuiltRef.current) {
+              messageBeingBuiltRef.current = false;
+              console.log("Agent finished typing message:", fullMessageRef.current.substring(0, 50) + (fullMessageRef.current.length > 50 ? '...' : ''));
+              
+              // Process any remaining speech buffer
+              if (speechBufferRef.current.length > 0) {
+                processSpeechBuffer();
+              }
+            }
           }
         } catch (error) {
           console.error('Error processing WebSocket message:', error);
@@ -249,6 +396,12 @@ export const AnonymousChatWidget: React.FC = () => {
         
         // Also stop any audio playback
         tts.stopAudio();
+        
+        // Clear any pending TTS timer
+        if (bufferTimeoutRef.current) {
+          clearTimeout(bufferTimeoutRef.current);
+          bufferTimeoutRef.current = null;
+        }
       };
     }
   }, [isOpen, sessionId, agentType]);
@@ -264,9 +417,6 @@ export const AnonymousChatWidget: React.FC = () => {
   const handleSendMessage = () => {
     if (!inputValue.trim()) return;
     
-    // Note: We don't stop listening here - this allows continuous transcription
-    // while still sending the message
-    
     console.log('Attempting to send message:', inputValue);
     
     const newMessage = {
@@ -277,6 +427,17 @@ export const AnonymousChatWidget: React.FC = () => {
     };
     
     setMessages(prev => [...prev, newMessage]);
+    
+    // Reset state for new conversation
+    fullMessageRef.current = '';
+    messageBeingBuiltRef.current = false;
+    speechBufferRef.current = '';
+    
+    // Clear any pending buffer processing
+    if (bufferTimeoutRef.current) {
+      clearTimeout(bufferTimeoutRef.current);
+      bufferTimeoutRef.current = null;
+    }
     
     // Send to WebSocket if connected
     if (wsRef.current) {
@@ -353,8 +514,6 @@ export const AnonymousChatWidget: React.FC = () => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
-      // Don't stop speech recognition when sending with Enter key
-      // This allows for continuous dictation across multiple messages
     }
   };
 
@@ -440,15 +599,38 @@ export const AnonymousChatWidget: React.FC = () => {
         
         {/* Buttons group */}
         <div className="flex items-center gap-2 ml-auto">
+          {/* Microphone (STT) toggle for continuous listening */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`h-8 w-8 text-white hover:bg-blue-700 rounded-full ${stt.isListening ? 'bg-red-500 hover:bg-red-600' : ''}`}
+            onClick={stt.toggleListening}
+            aria-label={stt.isListening ? "Stop listening" : "Start listening"}
+          >
+            {stt.isListening ? 
+              <MicOff size={16} className="text-white animate-pulse" /> : 
+              <Mic size={16} />}
+          </Button>
+
           {/* Text-to-speech toggle */}
           <Toggle
             aria-label="Toggle text-to-speech"
             pressed={tts.isEnabled}
             onPressedChange={(pressed) => {
               tts.setEnabled(pressed);
-              // Play a confirmation sound when enabled
-              if (pressed) {
-                tts.playAudio("Text to speech is now active");
+              
+              // Clear speech buffer when disabled
+              if (!pressed) {
+                speechBufferRef.current = '';
+                tts.stopAudio();
+                
+                if (bufferTimeoutRef.current) {
+                  clearTimeout(bufferTimeoutRef.current);
+                  bufferTimeoutRef.current = null;
+                }
+              } else {
+                // Play a confirmation sound when enabled
+                speakCompleteMessage("Text to speech is now on");
               }
             }}
             className={`mr-2 ${tts.isEnabled ? 'bg-blue-700 hover:bg-blue-800' : ''}`}
