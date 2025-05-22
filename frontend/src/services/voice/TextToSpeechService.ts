@@ -34,37 +34,47 @@ export interface TtsOptions {
 export const cleanTextForSpeech = (text: string): string => {
   if (!text) return '';
   
-  // Remove markdown headers, bullets, code blocks, etc.
   let cleaned = text
     // Remove markdown headers
     .replace(/#{1,6}\s+/g, '')
     // Remove markdown code blocks with language specification
-    .replace(/```[\w]*\n[\s\S]*?```/g, 'code snippet. ')
+    .replace(/```[\w]*\n[\s\S]*?```/g, ' code snippet ')
     // Remove markdown code blocks without language
-    .replace(/```[\s\S]*?```/g, 'code snippet. ')
+    .replace(/```[\s\S]*?```/g, ' code snippet ')
     // Remove inline code
     .replace(/`([^`]+)`/g, '$1')
-    // Remove markdown bold/italic
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/_([^_]+)_/g, '$1')
-    // Remove markdown bullets
+    // CRITICAL: Remove all asterisks and markdown formatting
+    .replace(/\*\*([^*]+)\*\*/g, '$1')  // Bold
+    .replace(/\*([^*]+)\*/g, '$1')      // Italic
+    .replace(/\*/g, '')                 // Any remaining asterisks
+    .replace(/__([^_]+)__/g, '$1')      // Bold underscores
+    .replace(/_([^_]+)_/g, '$1')        // Italic underscores
+    .replace(/_/g, '')                  // Any remaining underscores
+    // Remove markdown bullets and lists
     .replace(/^\s*[-*+]\s+/gm, '')
-    // Remove markdown numbered lists
     .replace(/^\s*\d+\.\s+/gm, '')
     // Remove URLs but keep linked text
     .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
     // Remove standalone URLs
-    .replace(/https?:\/\/\S+/g, 'URL')
+    .replace(/https?:\/\/\S+/g, 'link')
     // Remove HTML tags
     .replace(/<[^>]*>/g, '')
-    // Fix common spoken oddities
-    .replace(/(\w)-(\w)/g, '$1 $2')  // Hyphenated words
+    // Handle symbols that get pronounced
     .replace(/&/g, ' and ')
     .replace(/\//g, ' or ')
+    .replace(/@/g, ' at ')
+    .replace(/#/g, ' hash ')
+    .replace(/\$/g, ' dollar ')
+    .replace(/%/g, ' percent ')
+    .replace(/\+/g, ' plus ')
+    .replace(/=/g, ' equals ')
+    .replace(/\|/g, ' ')
+    .replace(/\\/g, ' ')
+    .replace(/\^/g, ' ')
+    .replace(/~/g, ' ')
+    .replace(/`/g, '')
     // Handle common abbreviations
-    .replace(/\bTL;DR\b/g, 'T L D R')
+    .replace(/\bTL;DR\b/gi, 'T L D R')
     .replace(/\bUI\b/g, 'U I')
     .replace(/\bAPI\b/g, 'A P I')
     .replace(/\bHTML\b/g, 'H T M L')
@@ -74,12 +84,28 @@ export const cleanTextForSpeech = (text: string): string => {
     .replace(/\bHTTP\b/g, 'H T T P')
     .replace(/\bSVG\b/g, 'S V G')
     .replace(/\bPDF\b/g, 'P D F')
-    // Remove excess punctuation
-    .replace(/\.{2,}/g, '.')
-    .replace(/\,{2,}/g, ',')
-    .replace(/\?{2,}/g, '?')
-    .replace(/\!{2,}/g, '!')
-    // Remove excess whitespace
+    .replace(/\bAI\b/g, 'A I')
+    .replace(/\bDB\b/g, 'database')
+    .replace(/\bJS\b/g, 'JavaScript')
+    .replace(/\bTS\b/g, 'TypeScript')
+    // Normalize punctuation spacing
+    .replace(/\s*\.\s*/g, '. ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s*;\s*/g, '; ')
+    .replace(/\s*:\s*/g, ': ')
+    .replace(/\s*!\s*/g, '! ')
+    .replace(/\s*\?\s*/g, '? ')
+    // Remove multiple consecutive punctuation
+    .replace(/[.]{2,}/g, '.')
+    .replace(/[,]{2,}/g, ',')
+    .replace(/[?]{2,}/g, '?')
+    .replace(/[!]{2,}/g, '!')
+    // Remove parentheses content that's often metadata
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    // Fix hyphenated words
+    .replace(/(\w)-(\w)/g, '$1 $2')
+    // Clean up excess whitespace
     .replace(/\s+/g, ' ')
     .trim();
   
@@ -90,7 +116,7 @@ export const cleanTextForSpeech = (text: string): string => {
  * Hook for using text-to-speech functionality
  */
 export const useTextToSpeech = (options: TtsOptions = {}) => {
-  // Default options
+  // Default options - optimized for natural speech
   const defaultOptions: Required<TtsOptions> = {
     voiceId: 'en-US-Neural2-C',
     speakingRate: 1.0,
@@ -100,29 +126,28 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
     onPlaybackStart: () => {},
     onPlaybackEnd: () => {},
     onPlaybackError: () => {},
-    minChunkSize: 20,    // Minimum characters to speak
-    chunkPause: 100      // Slight pause between chunks
+    minChunkSize: 30,    // Minimum for clause boundaries (not used for sentence boundaries)
+    chunkPause: 50       // Short pause between chunks
   };
 
   // Merge provided options with defaults
   const opts = { ...defaultOptions, ...options };
 
   // States
-  const [isEnabled, setIsEnabled] = useState(true); // Enable by default
+  const [isEnabled, setIsEnabled] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isSpeakingComplete, setIsSpeakingComplete] = useState(true);
-  const [lastTokenTime, setLastTokenTime] = useState(0);
 
   // Refs
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const speechBufferRef = useRef<string>('');
   const audioQueueRef = useRef<string[]>([]);
   const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const typingPauseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isProcessingRef = useRef<boolean>(false);
   
-  // List of common sentence delimiters
-  const sentenceDelimiters = ['.', '!', '?', ':', ';', '\n'];
+  // Natural sentence boundaries
+  const sentenceEnders = ['.', '!', '?'];
+  const clauseEnders = [':', ';', ','];
 
   // Helper function to convert base64 to Blob
   const base64ToBlob = (base64: string, mimeType: string) => {
@@ -176,7 +201,6 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
         isProcessingRef.current = false;
         opts.onPlaybackEnd();
         
-        // Process the next item in the queue
         if (audioQueueRef.current.length > 0) {
           setTimeout(() => processNextInQueue(), opts.chunkPause);
         } else {
@@ -185,7 +209,7 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
         return;
       }
       
-      console.log('Converting to speech:', processedText.substring(0, 50) + (processedText.length > 50 ? '...' : ''));
+      console.log('Converting to speech:', processedText.substring(0, 100) + (processedText.length > 100 ? '...' : ''));
       
       const response = await fetch(opts.apiUrl, {
         method: 'POST',
@@ -208,7 +232,6 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
         isProcessingRef.current = false;
         opts.onPlaybackError(new Error(errorText));
         
-        // Try next item in the queue
         if (audioQueueRef.current.length > 0) {
           setTimeout(() => processNextInQueue(), opts.chunkPause);
         } else {
@@ -220,25 +243,20 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
       const data = await response.json();
       
       if (data.success && data.audio_base64) {
-        // Create a URL for the audio
         const audioBlob = base64ToBlob(data.audio_base64, data.mime_type);
         const audioUrl = URL.createObjectURL(audioBlob);
         
-        // Create or use existing audio element
         if (!audioPlayerRef.current) {
           audioPlayerRef.current = new Audio();
         }
         
-        // Set up event handlers
         audioPlayerRef.current.onended = () => {
           setIsPlaying(false);
           isProcessingRef.current = false;
           opts.onPlaybackEnd();
           
-          // Release the URL to prevent memory leaks
           URL.revokeObjectURL(audioUrl);
           
-          // Process the next item in the queue with a short pause
           if (audioQueueRef.current.length > 0) {
             setTimeout(() => processNextInQueue(), opts.chunkPause);
           } else {
@@ -252,10 +270,8 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
           isProcessingRef.current = false;
           opts.onPlaybackError(error);
           
-          // Release the URL
           URL.revokeObjectURL(audioUrl);
           
-          // Try next item in the queue
           if (audioQueueRef.current.length > 0) {
             setTimeout(() => processNextInQueue(), opts.chunkPause);
           } else {
@@ -263,7 +279,6 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
           }
         };
         
-        // Set source and play
         audioPlayerRef.current.src = audioUrl;
         await audioPlayerRef.current.play();
       } else {
@@ -272,7 +287,6 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
         isProcessingRef.current = false;
         opts.onPlaybackError(new Error('Missing audio data in response'));
         
-        // Try next item in the queue
         if (audioQueueRef.current.length > 0) {
           setTimeout(() => processNextInQueue(), opts.chunkPause);
         } else {
@@ -285,7 +299,6 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
       isProcessingRef.current = false;
       opts.onPlaybackError(error);
       
-      // Try next item in the queue
       if (audioQueueRef.current.length > 0) {
         setTimeout(() => processNextInQueue(), opts.chunkPause);
       } else {
@@ -294,22 +307,83 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
     }
   };
 
-  // Process the speech buffer 
+  // Chunk text at natural punctuation boundaries for better speech flow
+  const createNaturalChunks = (text: string): string[] => {
+    if (!text.trim()) return [];
+    
+    const chunks: string[] = [];
+    
+    // Split by paragraphs first (double line breaks)
+    const paragraphs = text.split(/\n\s*\n/);
+    
+    for (const paragraph of paragraphs) {
+      if (!paragraph.trim()) continue;
+      
+      // Split at sentence boundaries (.!?) - these create the most natural pauses
+      const sentences = paragraph.split(/([.!?]+\s*)/).filter(s => s.trim());
+      
+      let currentChunk = '';
+      
+      for (const part of sentences) {
+        // If this is a sentence ender, add it to current chunk and finalize
+        if (/[.!?]+\s*$/.test(part.trim())) {
+          currentChunk += part;
+          if (currentChunk.trim()) {
+            chunks.push(currentChunk.trim());
+            currentChunk = '';
+          }
+        } else {
+          // This is sentence content - check for clause boundaries
+          const clauses = part.split(/([;:,]\s*)/).filter(s => s.trim());
+          
+          for (const clause of clauses) {
+            // If adding this clause would be reasonable, add it
+            const testChunk = currentChunk + clause;
+            
+            // If this is a clause ender or we have a reasonable length, consider chunking
+            if (/[;:,]\s*$/.test(clause.trim())) {
+              currentChunk += clause;
+              // Only chunk at commas/semicolons if we have substantial content (30+ chars)
+              if (currentChunk.length > 30) {
+                chunks.push(currentChunk.trim());
+                currentChunk = '';
+              }
+            } else {
+              currentChunk += clause;
+            }
+          }
+        }
+      }
+      
+      // Add any remaining content from this paragraph
+      if (currentChunk.trim()) {
+        chunks.push(currentChunk.trim());
+      }
+    }
+    
+    return chunks.filter(chunk => chunk.trim().length > 0);
+  };
+
+  // Process the speech buffer
   const processSpeechBuffer = () => {
-    if (!isEnabled || !opts.useSmartBuffering || !speechBufferRef.current) {
+    if (!isEnabled || !opts.useSmartBuffering || !speechBufferRef.current.trim()) {
       return;
     }
 
-    // Get text from the buffer and clear it
-    const textToSpeak = speechBufferRef.current;
+    const textToProcess = speechBufferRef.current;
     speechBufferRef.current = '';
     
-    // Add to the queue
-    if (textToSpeak.trim()) {
-      audioQueueRef.current.push(textToSpeak);
+    const chunks = createNaturalChunks(textToProcess);
+    
+    chunks.forEach(chunk => {
+      if (chunk.trim()) {
+        audioQueueRef.current.push(chunk);
+      }
+    });
+    
+    if (chunks.length > 0) {
       setIsSpeakingComplete(false);
       
-      // Start processing the queue if not already processing
       if (!isProcessingRef.current && !isPlaying) {
         processNextInQueue();
       }
@@ -322,100 +396,73 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
       return;
     }
     
-    // Update the last token time
-    setLastTokenTime(Date.now());
-    
-    // Add to buffer
     speechBufferRef.current += text;
     
-    // Clear any pending timeout
     if (processingTimeoutRef.current) {
       clearTimeout(processingTimeoutRef.current);
     }
     
-    // Check if we have a complete sentence or significant content
-    const hasCompletePhrase = sentenceDelimiters.some(d => speechBufferRef.current.includes(d));
+    // Check for sentence endings - these are the best natural break points
+    const hasSentenceEnd = /[.!?]\s*$/.test(speechBufferRef.current.trim());
     
-    // Process the buffer if we have a complete phrase or enough text
-    if (hasCompletePhrase || speechBufferRef.current.length >= opts.minChunkSize) {
+    // Check for clause endings if we have enough content
+    const hasClauseEnd = /[;:,]\s*$/.test(speechBufferRef.current.trim()) && 
+                        speechBufferRef.current.length > opts.minChunkSize;
+    
+    if (hasSentenceEnd || hasClauseEnd) {
+      // Natural break point found - process immediately
       processSpeechBuffer();
     } else {
-      // Set a timeout to process buffer even if we don't get a complete phrase
+      // No natural break yet - set timeout for processing
       processingTimeoutRef.current = setTimeout(() => {
         if (speechBufferRef.current.trim()) {
           processSpeechBuffer();
         }
-      }, 1000); // Wait a second to collect more text
+      }, 1500);
     }
-    
-    // Set a timeout to detect when typing has paused
-    if (typingPauseTimeoutRef.current) {
-      clearTimeout(typingPauseTimeoutRef.current);
-    }
-    
-    typingPauseTimeoutRef.current = setTimeout(() => {
-      // If there's still text in the buffer, process it
-      if (speechBufferRef.current.trim()) {
-        processSpeechBuffer();
-      }
-    }, 500); // 500ms typing pause detection
   };
 
-  // Stream tokens of text for speech - call this as tokens arrive
+  // Stream tokens of text for speech
   const streamSpeech = (text: string) => {
     if (!isEnabled) return;
     
     if (opts.useSmartBuffering) {
       addToSpeechBuffer(text);
     } else {
-      // If not using smart buffering, speak each chunk directly
       playAudio(text);
     }
   };
 
-  // Finish streaming speech - call this when message is complete
+  // Finish streaming speech
   const finishSpeech = () => {
     if (!isEnabled) return;
     
-    // Process any remaining text in the buffer
     if (opts.useSmartBuffering && speechBufferRef.current.trim()) {
       processSpeechBuffer();
     }
   };
 
-  // Reset speech state - call this before starting a new message
+  // Reset speech state
   const resetSpeech = () => {
-    // Clear the buffer
     speechBufferRef.current = '';
     
-    // Clear any pending timeouts
     if (processingTimeoutRef.current) {
       clearTimeout(processingTimeoutRef.current);
       processingTimeoutRef.current = null;
     }
-    
-    if (typingPauseTimeoutRef.current) {
-      clearTimeout(typingPauseTimeoutRef.current);
-      typingPauseTimeoutRef.current = null;
-    }
   };
 
-  // Play a complete message all at once
+  // Play a complete message
   const playAudio = async (text: string) => {
     if (!isEnabled || !text.trim()) return;
     
-    // For complete messages, we stop any current playback
     stopAudio();
     resetSpeech();
     
-    // Clear the queue
     audioQueueRef.current = [];
-    
-    // Add the complete message to the queue
     audioQueueRef.current.push(text);
     setIsSpeakingComplete(false);
     
-    // Process the queue
     processNextInQueue();
   };
 
@@ -430,21 +477,12 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
       opts.onPlaybackEnd();
     }
     
-    // Clear the queue
     audioQueueRef.current = [];
-    
-    // Clear the buffer
     speechBufferRef.current = '';
     
-    // Clear timeouts
     if (processingTimeoutRef.current) {
       clearTimeout(processingTimeoutRef.current);
       processingTimeoutRef.current = null;
-    }
-    
-    if (typingPauseTimeoutRef.current) {
-      clearTimeout(typingPauseTimeoutRef.current);
-      typingPauseTimeoutRef.current = null;
     }
     
     setIsSpeakingComplete(true);
@@ -453,9 +491,7 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
   // Cleanup effect
   useEffect(() => {
     return () => {
-      // Cleanup audio element on unmount
       stopAudio();
-      
       if (audioPlayerRef.current) {
         audioPlayerRef.current = null;
       }
@@ -472,10 +508,10 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
         stopAudio();
       }
     },
-    playAudio,         // For complete messages
-    streamSpeech,      // For streaming tokens
-    finishSpeech,      // Call when message is complete
-    resetSpeech,       // Call before starting a new message
+    playAudio,
+    streamSpeech,
+    finishSpeech,
+    resetSpeech,
     stopAudio
   };
 };
