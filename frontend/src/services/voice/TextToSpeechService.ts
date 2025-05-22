@@ -108,7 +108,7 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
   const opts = { ...defaultOptions, ...options };
 
   // States
-  const [isEnabled, setIsEnabled] = useState(false);
+  const [isEnabled, setIsEnabled] = useState(true); // Enable by default
   const [isPlaying, setIsPlaying] = useState(false);
   const [isSpeakingComplete, setIsSpeakingComplete] = useState(true);
   const [lastTokenTime, setLastTokenTime] = useState(0);
@@ -479,4 +479,3 @@ export const useTextToSpeech = (options: TtsOptions = {}) => {
     stopAudio
   };
 };
-

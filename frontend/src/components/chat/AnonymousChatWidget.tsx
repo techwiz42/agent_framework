@@ -51,14 +51,6 @@ export const AnonymousChatWidget: React.FC = () => {
   const messageBeingBuiltRef = useRef<boolean>(false);
   const fullMessageRef = useRef<string>('');  // Track the full message as it's built
   
-  // Buffer to accumulate text for speech
-  const speechBufferRef = useRef<string>('');
-  const lastSpeechTimeRef = useRef<number>(0);
-  const bufferTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
-  // Sentence boundary punctuation for better speech segmentation
-  const sentenceEndingPunctuation = ['.', '!', '?', ':', ';', '\n'];
-  
   // Initialize speech to text service with callbacks
   const stt = useSpeechToText({
     sampleRate: 48000,
@@ -72,94 +64,22 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   });
 
-  // Initialize text to speech service
+  // Initialize text to speech service with smart buffering
   const tts = useTextToSpeech({
-    // Enable text preprocessing in the TTS service
-    preprocessText: true,
+    preprocessText: true,           // Clean markdown and formatting
+    useSmartBuffering: true,        // Use smart buffering for streaming
+    minChunkSize: 30,               // Minimum characters to speak at once
+    chunkPause: 100,                // Small pause between chunks (ms)
     onPlaybackStart: () => {
       console.log("TTS playback started");
     },
     onPlaybackEnd: () => {
       console.log("TTS playback ended");
-      // We've finished speaking, try to process more text if available
-      processSpeechBuffer();
     },
     onPlaybackError: (error) => {
       console.error("TTS playback error:", error);
-      // Try to continue with the next segment on error
-      processSpeechBuffer();
     }
   });
-  
-  // Process and speak text from the speech buffer
-  const processSpeechBuffer = () => {
-    if (!tts.isEnabled || tts.isPlaying) return;
-
-      const textToSpeak = speechBufferRef.current.trim();
-      speechBufferRef.current = ''; // 🛠 clear before playing to prevent loop
-
-    if (textToSpeak.length > 0) {
-      console.log("Speaking buffer:", textToSpeak.substring(0, 50) + (textToSpeak.length > 50 ? '...' : ''));
-      tts.playAudio(textToSpeak);
-      lastSpeechTimeRef.current = Date.now();
-    }
-  };
-
-  // Add text to the speech buffer and process when appropriate
-  const addToSpeechBuffer = (text: string) => {
-    if (!tts.isEnabled) return;
-    
-    // Add new text to buffer
-    speechBufferRef.current += text;
-    
-    // Clear any existing timeout
-    if (bufferTimeoutRef.current) {
-      clearTimeout(bufferTimeoutRef.current);
-      bufferTimeoutRef.current = null;
-    }
-    
-    // Check if buffer contains full sentences or significant content
-    const hasCompleteSentence = sentenceEndingPunctuation.some(punct => 
-      speechBufferRef.current.includes(punct));
-    
-    // Process immediately if:
-    // 1. We have a complete sentence, OR
-    // 2. It's been more than 1 second since last speech, OR
-    // 3. We have a substantial amount of text (over 60 chars)
-    const now = Date.now();
-    if (hasCompleteSentence || 
-        now - lastSpeechTimeRef.current > 1000 || 
-        speechBufferRef.current.length > 60) {
-      
-      // If not currently speaking, process the buffer
-      if (!tts.isPlaying) {
-        processSpeechBuffer();
-        lastSpeechTimeRef.current = now;
-      }
-    } else {
-      // Set a timeout to process the buffer after a short delay
-      // This ensures that we'll speak even if we don't get a complete sentence
-      bufferTimeoutRef.current = setTimeout(() => {
-        if (!tts.isPlaying && speechBufferRef.current.length > 0) {
-          processSpeechBuffer();
-          lastSpeechTimeRef.current = Date.now();
-        }
-      }, 500);
-    }
-  };
-  
-  // Speak a complete message immediately
-  const speakCompleteMessage = (message: string) => {
-    if (!tts.isEnabled) return;
-
-    tts.stopAudio();
-    speechBufferRef.current = '';
-
-    console.log("Speaking complete message:", message.substring(0, 50) + (message.length > 50 ? '...' : ''));
-    tts.playAudio(message);
-    lastSpeechTimeRef.current = Date.now();
-  };
-
 
   // WebSocket connection function 
   const connectWebSocket = () => {
@@ -204,7 +124,8 @@ export const AnonymousChatWidget: React.FC = () => {
           
           // Speak the welcome message
           if (tts.isEnabled) {
-            speakCompleteMessage(welcomeMessage);
+            console.log("Playing welcome message via TTS");
+            tts.playAudio(welcomeMessage);
           }
         } else {
           // For reconnections, add a different message
@@ -220,7 +141,7 @@ export const AnonymousChatWidget: React.FC = () => {
           
           // Speak the reconnection message
           if (tts.isEnabled) {
-            speakCompleteMessage(reconnectMessage);
+            tts.playAudio(reconnectMessage);
           }
         }
       };
@@ -249,7 +170,6 @@ export const AnonymousChatWidget: React.FC = () => {
             // Reset the message building state
             messageBeingBuiltRef.current = false;
             fullMessageRef.current = '';
-            speechBufferRef.current = '';
             
             // Create a new message
             const newMessage = {
@@ -263,9 +183,10 @@ export const AnonymousChatWidget: React.FC = () => {
             setMessages(prev => [...prev, newMessage]);
             setIsTyping(false);
             
-            // Play the entire message via TTS
+            // Speak the full message (not streamed)
             if (tts.isEnabled) {
-              speakCompleteMessage(messageContent);
+              console.log("Playing complete message via TTS");
+              tts.playAudio(messageContent);
             }
           } else if (data.type === 'token') {
             // Handle streaming tokens
@@ -278,6 +199,12 @@ export const AnonymousChatWidget: React.FC = () => {
             if (!messageBeingBuiltRef.current) {
               messageBeingBuiltRef.current = true;
               
+              // Reset TTS before starting a new message
+              if (tts.isEnabled) {
+                console.log("Starting new streaming message - resetting TTS");
+                tts.resetSpeech();
+              }
+              
               // Add a new streaming message
               setMessages(prev => [...prev, {
                 id: uuidv4(),
@@ -287,8 +214,11 @@ export const AnonymousChatWidget: React.FC = () => {
                 agentType: agentType
               }]);
               
-              // Start buffering speech
-              addToSpeechBuffer(token);
+              // Start streaming the token
+              if (tts.isEnabled) {
+                console.log("Streaming first token:", token);
+                tts.streamSpeech(token);
+              }
             } else {
               // Update the last message with the accumulated tokens
               setMessages(prev => {
@@ -305,8 +235,10 @@ export const AnonymousChatWidget: React.FC = () => {
                 return updatedMessages;
               });
               
-              // Add to speech buffer
-              addToSpeechBuffer(token);
+              // Stream the token for speech
+              if (tts.isEnabled) {
+                tts.streamSpeech(token);
+              }
             }
           } else if (data.type === 'typing_status') {
             // Agent typing indicator
@@ -317,9 +249,10 @@ export const AnonymousChatWidget: React.FC = () => {
               messageBeingBuiltRef.current = false;
               console.log("Agent finished typing message:", fullMessageRef.current.substring(0, 50) + (fullMessageRef.current.length > 50 ? '...' : ''));
               
-              // Process any remaining speech buffer
-              if (speechBufferRef.current.length > 0) {
-                processSpeechBuffer();
+              // Finish speech processing
+              if (tts.isEnabled) {
+                console.log("Finishing TTS speech for complete message");
+                tts.finishSpeech();
               }
             }
           }
@@ -386,14 +319,8 @@ export const AnonymousChatWidget: React.FC = () => {
           wsRef.current = null;
         }
         
-        // Also stop any audio playback
+        // Stop any audio playback
         tts.stopAudio();
-        
-        // Clear any pending TTS timer
-        if (bufferTimeoutRef.current) {
-          clearTimeout(bufferTimeoutRef.current);
-          bufferTimeoutRef.current = null;
-        }
       };
     }
   }, [isOpen, sessionId, agentType]);
@@ -423,13 +350,9 @@ export const AnonymousChatWidget: React.FC = () => {
     // Reset state for new conversation
     fullMessageRef.current = '';
     messageBeingBuiltRef.current = false;
-    speechBufferRef.current = '';
     
-    // Clear any pending buffer processing
-    if (bufferTimeoutRef.current) {
-      clearTimeout(bufferTimeoutRef.current);
-      bufferTimeoutRef.current = null;
-    }
+    // Stop any current speech
+    tts.stopAudio();
     
     // Send to WebSocket if connected
     if (wsRef.current) {
@@ -609,20 +532,15 @@ export const AnonymousChatWidget: React.FC = () => {
             aria-label="Toggle text-to-speech"
             pressed={tts.isEnabled}
             onPressedChange={(pressed) => {
+              console.log("TTS toggle changed to:", pressed);
               tts.setEnabled(pressed);
               
               // Clear speech buffer when disabled
               if (!pressed) {
-                speechBufferRef.current = '';
                 tts.stopAudio();
-                
-                if (bufferTimeoutRef.current) {
-                  clearTimeout(bufferTimeoutRef.current);
-                  bufferTimeoutRef.current = null;
-                }
               } else {
                 // Play a confirmation sound when enabled
-                speakCompleteMessage("Text to speech is now on");
+                tts.playAudio("Text to speech is now on");
               }
             }}
             className={`mr-2 ${tts.isEnabled ? 'bg-blue-700 hover:bg-blue-800' : ''}`}
