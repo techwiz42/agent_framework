@@ -41,6 +41,7 @@ export const AnonymousChatWidget: React.FC = () => {
   const [isTyping, setIsTyping] = useState(false);
   const [isConnected, setIsConnected] = useState(true);
   const [sessionId] = useState(uuidv4());
+  const [sttEnabled, setSttEnabled] = useState(true); // Enable STT by default
   
   // Using CUSTOMERSERVICE agent
   const agentType = 'CUSTOMERSERVICE';
@@ -54,13 +55,22 @@ export const AnonymousChatWidget: React.FC = () => {
   // Initialize speech to text service with callbacks
   const stt = useSpeechToText({
     sampleRate: 48000,
+    silenceThreshold: 15, // Increased for better noise handling
+    silentFramesToProcess: 8, // More conservative processing
     onTranscription: (text) => {
+      console.log('STT transcription received:', text);
       setInputValue(prev => {
         // Ensure proper spacing between existing text and new transcription
         if (!prev) return text;
         const needsSpace = !prev.endsWith(' ') && !text.startsWith(' ');
         return prev + (needsSpace ? ' ' : '') + text;
       });
+    },
+    onAudioLevelChange: (level) => {
+      // Audio level change handled in the component via stt.audioLevel
+    },
+    onStatusChange: (status) => {
+      console.log('STT status change:', status);
     }
   });
 
@@ -80,6 +90,30 @@ export const AnonymousChatWidget: React.FC = () => {
       console.error("TTS playback error:", error);
     }
   });
+
+  // Auto-start STT when chat opens if enabled
+  useEffect(() => {
+    if (isOpen && sttEnabled && !stt.isListening) {
+      console.log('Auto-starting STT since chat is open and STT is enabled');
+      setTimeout(() => {
+        stt.startListening();
+      }, 1000); // Small delay to ensure UI is ready
+    }
+  }, [isOpen, sttEnabled]);
+
+  // Handle STT toggle
+  const handleSttToggle = () => {
+    const newEnabled = !sttEnabled;
+    setSttEnabled(newEnabled);
+    
+    if (newEnabled && isOpen) {
+      // Start listening when enabled
+      stt.startListening();
+    } else if (stt.isListening) {
+      // Stop listening when disabled
+      stt.stopListening();
+    }
+  };
 
   // WebSocket connection function 
   const connectWebSocket = () => {
@@ -112,7 +146,7 @@ export const AnonymousChatWidget: React.FC = () => {
         
         // Only add welcome message if this is the first connection (no messages yet)
         if (messages.length === 0) {
-          const welcomeMessage = "Hello! I'm here to help with any customer service questions you might have. How can I assist you today?";
+          const welcomeMessage = "Hello! I'm here to help with any customer service questions you might have. You can speak to me directly using the microphone or type your message. How can I assist you today?";
           
           setMessages([{
             id: uuidv4(),
@@ -319,9 +353,17 @@ export const AnonymousChatWidget: React.FC = () => {
           wsRef.current = null;
         }
         
-        // Stop any audio playback
+        // Stop any audio playback and STT
         tts.stopAudio();
+        if (stt.isListening) {
+          stt.stopListening();
+        }
       };
+    } else {
+      // Stop STT when chat is closed
+      if (stt.isListening) {
+        stt.stopListening();
+      }
     }
   }, [isOpen, sessionId, agentType]);
 
@@ -450,7 +492,7 @@ export const AnonymousChatWidget: React.FC = () => {
     return (
       <div className="fixed bottom-4 right-4 flex flex-col items-end gap-2 z-40">
         <div className="bg-blue-600 text-white text-sm rounded-lg shadow-md px-3 py-1 mr-2 relative after:content-[''] after:absolute after:top-full after:right-4 after:border-8 after:border-transparent after:border-t-blue-600">
-          Chat with AI
+          Chat with AI (Voice Enabled)
         </div>
         <Button 
           onClick={toggleChat}
@@ -471,6 +513,9 @@ export const AnonymousChatWidget: React.FC = () => {
           <div className="flex items-center gap-2">
             <Bot size={20} />
             <div className="font-medium">{agentDisplayName}</div>
+            {sttEnabled && stt.isListening && (
+              <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
+            )}
           </div>
           <div className="flex gap-2">
             <Button
@@ -506,25 +551,31 @@ export const AnonymousChatWidget: React.FC = () => {
           <Bot size={20} />
           <div>
             <h3 className="font-medium">{agentDisplayName}</h3>
-            <div className="text-xs opacity-80">
-              {isConnected ? 'Connected' : 'Connecting...'}
+            <div className="text-xs opacity-80 flex items-center gap-2">
+              <span>{isConnected ? 'Connected' : 'Connecting...'}</span>
+              {sttEnabled && stt.isListening && (
+                <span className="flex items-center gap-1">
+                  <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
+                  Listening
+                </span>
+              )}
             </div>
           </div>
         </div>
         
         {/* Buttons group */}
         <div className="flex items-center gap-2 ml-auto">
-          {/* Microphone (STT) toggle for continuous listening */}
+          {/* Speech-to-text toggle */}
           <Button
             variant="ghost"
             size="icon"
-            className={`h-8 w-8 text-white hover:bg-blue-700 rounded-full ${stt.isListening ? 'bg-red-500 hover:bg-red-600' : ''}`}
-            onClick={stt.toggleListening}
-            aria-label={stt.isListening ? "Stop listening" : "Start listening"}
+            className={`h-8 w-8 text-white hover:bg-blue-700 rounded-full ${sttEnabled && stt.isListening ? 'bg-red-500 hover:bg-red-600' : ''}`}
+            onClick={handleSttToggle}
+            aria-label={sttEnabled ? (stt.isListening ? "Disable voice input" : "Enable voice input") : "Enable voice input"}
           >
-            {stt.isListening ? 
-              <MicOff size={16} className="text-white animate-pulse" /> : 
-              <Mic size={16} />}
+            {sttEnabled && stt.isListening ? 
+              <Mic size={16} className="text-white animate-pulse" /> : 
+              sttEnabled ? <Mic size={16} /> : <MicOff size={16} />}
           </Button>
 
           {/* Text-to-speech toggle */}
@@ -627,18 +678,17 @@ export const AnonymousChatWidget: React.FC = () => {
         <div className="flex gap-2 items-center">
           <Input
             className="flex-1"
-            placeholder={stt.isListening ? "Speak and I'll transcribe continuously as you talk..." : "Type your message or click the mic to speak..."}
+            placeholder={sttEnabled && stt.isListening ? "Speak and I'll transcribe continuously..." : "Type your message or enable voice input..."}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={!isConnected}
           />
           
-          {/* Microphone button with dynamic styling and volume indicator */}
-          <div className="relative">
-            {stt.isListening && (
+          {/* Voice input status indicator */}
+          {sttEnabled && stt.isListening && (
+            <div className="relative">
               <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs px-2 py-1 rounded">
-                {/* Volume meter */}
                 <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden">
                   <div 
                     className="h-full bg-gradient-to-r from-green-500 to-red-500" 
@@ -646,19 +696,8 @@ export const AnonymousChatWidget: React.FC = () => {
                   />
                 </div>
               </div>
-            )}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={stt.isListening ? stt.stopListening : stt.startListening}
-              className={`rounded-full h-10 w-10 ${stt.isListening ? 'bg-red-500 text-white hover:bg-red-600' : 'text-blue-600 hover:bg-blue-50'}`}
-              aria-label={stt.isListening ? "Stop listening" : "Start listening"}
-            >
-              {stt.isListening ? 
-                <Mic size={18} className="animate-pulse" /> : 
-                <Mic size={18} />}
-            </Button>
-          </div>
+            </div>
+          )}
           
           <Button
             type="submit"
