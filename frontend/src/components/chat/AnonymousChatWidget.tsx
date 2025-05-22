@@ -94,20 +94,17 @@ export const AnonymousChatWidget: React.FC = () => {
   // Process and speak text from the speech buffer
   const processSpeechBuffer = () => {
     if (!tts.isEnabled || tts.isPlaying) return;
-    
-    // If we have accumulated text in the buffer
-    if (speechBufferRef.current.length > 0) {
-      // Only speak if we have meaningful text
-      if (speechBufferRef.current.trim().length > 0) {
-        console.log("Speaking buffer:", speechBufferRef.current.substring(0, 50) + (speechBufferRef.current.length > 50 ? '...' : ''));
-        tts.playAudio(speechBufferRef.current);
-      }
-      
-      // Clear the buffer after speaking
-      speechBufferRef.current = '';
+
+      const textToSpeak = speechBufferRef.current.trim();
+      speechBufferRef.current = ''; // 🛠 clear before playing to prevent loop
+
+    if (textToSpeak.length > 0) {
+      console.log("Speaking buffer:", textToSpeak.substring(0, 50) + (textToSpeak.length > 50 ? '...' : ''));
+      tts.playAudio(textToSpeak);
+      lastSpeechTimeRef.current = Date.now();
     }
   };
-  
+
   // Add text to the speech buffer and process when appropriate
   const addToSpeechBuffer = (text: string) => {
     if (!tts.isEnabled) return;
@@ -154,20 +151,15 @@ export const AnonymousChatWidget: React.FC = () => {
   // Speak a complete message immediately
   const speakCompleteMessage = (message: string) => {
     if (!tts.isEnabled) return;
-    
-    // Stop any current speech
+
     tts.stopAudio();
     speechBufferRef.current = '';
-    
-    // Speak the full message
+
     console.log("Speaking complete message:", message.substring(0, 50) + (message.length > 50 ? '...' : ''));
     tts.playAudio(message);
+    lastSpeechTimeRef.current = Date.now();
   };
-  
-  // Enable TTS by default
-  useEffect(() => {
-    tts.setEnabled(true);
-  }, []);
+
 
   // WebSocket connection function 
   const connectWebSocket = () => {
