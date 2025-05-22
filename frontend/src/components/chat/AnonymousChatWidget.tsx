@@ -146,7 +146,7 @@ export const AnonymousChatWidget: React.FC = () => {
         
         // Only add welcome message if this is the first connection (no messages yet)
         if (messages.length === 0) {
-          const welcomeMessage = "Hello! I'm here to help with any customer service questions you might have. You can speak to me directly using the microphone or type your message. How can I assist you today?";
+          const welcomeMessage = "Hello! How can I help you today?";
           
           setMessages([{
             id: uuidv4(),

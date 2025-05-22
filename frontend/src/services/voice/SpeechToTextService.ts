@@ -27,10 +27,10 @@ export interface SttOptions {
  * Hook for using speech-to-text functionality
  */
 export const useSpeechToText = (options: SttOptions = {}) => {
-  // Default options - reverted to working values
+  // Default options - simplified for reliability
   const defaultOptions: Required<SttOptions> = {
     silenceThreshold: 15,
-    silentFramesToProcess: 8,
+    silentFramesToProcess: 12, // Longer pause to ensure complete speech
     sampleRate: 48000,
     languageCode: 'en-US',
     apiUrl: `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`,
@@ -69,13 +69,14 @@ export const useSpeechToText = (options: SttOptions = {}) => {
     opts.onStatusChange(status);
   };
 
-  // Process audio data from recorder
+  // Process audio data from recorder - simplified approach
   const processAudioChunks = async () => {
     if (isProcessingRef.current || audioChunksRef.current.length === 0) {
       return;
     }
     
     isProcessingRef.current = true;
+    console.log(`Starting to process ${audioChunksRef.current.length} audio chunks`);
     
     try {
       // Filter out very small chunks
@@ -83,7 +84,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       
       if (validChunks.length === 0) {
         console.log('No valid audio chunks to process');
-        // Don't clear chunks here - let them accumulate
+        audioChunksRef.current = [];
         isProcessingRef.current = false;
         return;
       }
@@ -93,19 +94,17 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       const audioBlob = new Blob(validChunks, { type: mimeType });
       
       // Skip very small audio files
-      if (audioBlob.size < 1000) {
+      if (audioBlob.size < 2000) {
         console.log(`Audio too small (${audioBlob.size} bytes), skipping`);
-        // Don't clear chunks here - let them accumulate
+        audioChunksRef.current = [];
         isProcessingRef.current = false;
         return;
       }
       
       console.log(`Processing audio: ${audioBlob.size} bytes, ${validChunks.length} chunks`);
       
-      // CRITICAL FIX: Only clear chunks AFTER we create the blob but BEFORE processing
-      // This ensures the MediaRecorder can continue adding new chunks while we process
-      const chunksToProcess = [...audioChunksRef.current];
-      audioChunksRef.current = []; // Clear for new chunks
+      // Clear chunks for next recording - KEEP MediaRecorder running continuously
+      audioChunksRef.current = [];
       
       // Send the audio blob to the backend for STT
       const fileName = `recording_${Date.now()}.webm`;
@@ -134,24 +133,22 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       if (data.success && data.transcript) {
         const transcript = data.transcript.trim();
         if (transcript) {
-          console.log('Got transcript:', transcript);
+          console.log('✅ Got transcript:', transcript);
           opts.onTranscription(transcript);
         }
       } else if (data.message === "No speech detected") {
-        console.log('No speech detected in this segment, continuing to listen');
+        console.log('⚠️ No speech detected in this segment');
       } else if (data.error) {
-        console.warn('STT processing error:', data.error);
+        console.warn('❌ STT processing error:', data.error);
       }
       
     } catch (error) {
-      console.error('Error processing audio:', error);
+      console.error('❌ Error processing audio:', error);
     } finally {
       isProcessingRef.current = false;
-      // Reset speech detection flags to prepare for next utterance
-      hadSpeechRef.current = false;
+      // Reset silence counter for next detection cycle
       silentFrameCountRef.current = 0;
-      
-      console.log(`Audio processing complete. Continuing to listen for more speech...`);
+      console.log('✅ Processing complete. Ready for next speech...');
     }
   };
 
@@ -179,13 +176,15 @@ export const useSpeechToText = (options: SttOptions = {}) => {
     if (isSilent) {
       silentFrameCountRef.current++;
       
-      // Process audio after enough silent frames if we had speech
+      // Process audio after enough silent frames if we had speech AND not already processing
       if (silentFrameCountRef.current >= opts.silentFramesToProcess && 
           hadSpeechRef.current && 
-          audioChunksRef.current.length > 0) {
-        console.log(`Detected silence after speech, processing audio...`);
+          audioChunksRef.current.length > 0 &&
+          !isProcessingRef.current) {
+        console.log(`Detected ${silentFrameCountRef.current} silent frames after speech, processing audio...`);
+        // CRITICAL: Set hadSpeechRef to false BEFORE processing to prevent re-triggering
+        hadSpeechRef.current = false;
         processAudioChunks();
-        // Note: processAudioChunks will reset these flags
       }
     } else {
       // Reset silence counter and mark that we detected speech
@@ -266,14 +265,14 @@ export const useSpeechToText = (options: SttOptions = {}) => {
         stopListening();
       };
       
-      // Start recording in chunks
+      // Start recording
       mediaRecorder.start(1000); // 1 second chunks
       
       // Start silence detection
       silenceDetectionRef.current = setInterval(detectSilence, 100);
       
       setIsListening(true);
-      updateStatus('Listening continuously... Speak and I\'ll transcribe your words');
+      updateStatus('Listening... Speak and I\'ll transcribe your words');
       
       // Clear status after a few seconds
       setTimeout(() => {
@@ -341,6 +340,23 @@ export const useSpeechToText = (options: SttOptions = {}) => {
     hadSpeechRef.current = false;
   };
 
+  // Reset STT state (useful after sending a message)
+  const resetStt = () => {
+    console.log('🔄 Resetting STT state for next speech...');
+    silentFrameCountRef.current = 0;
+    hadSpeechRef.current = false;
+    
+    // Clear any accumulated chunks that haven't been processed (only if not currently processing)
+    if (!isProcessingRef.current) {
+      if (audioChunksRef.current.length > 0) {
+        console.log(`🗑️ Clearing ${audioChunksRef.current.length} unprocessed audio chunks`);
+        audioChunksRef.current = [];
+      }
+    }
+    
+    console.log('✅ STT reset complete - ready for new speech');
+  };
+
   // Toggle listening
   const toggleListening = () => {
     if (isListening) {
@@ -376,6 +392,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
     recordingStatus,
     startListening,
     stopListening,
-    toggleListening
+    toggleListening,
+    resetStt
   };
 };
