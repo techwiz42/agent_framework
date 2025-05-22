@@ -27,10 +27,10 @@ export interface SttOptions {
  * Hook for using speech-to-text functionality
  */
 export const useSpeechToText = (options: SttOptions = {}) => {
-  // Default options
+  // Default options - reverted to working values
   const defaultOptions: Required<SttOptions> = {
-    silenceThreshold: 15, // Increased threshold for better noise handling
-    silentFramesToProcess: 8, // More frames before processing
+    silenceThreshold: 15,
+    silentFramesToProcess: 8,
     sampleRate: 48000,
     languageCode: 'en-US',
     apiUrl: `${window.location.protocol}//${window.location.host}/api/voice/speech-to-text`,
@@ -83,7 +83,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       
       if (validChunks.length === 0) {
         console.log('No valid audio chunks to process');
-        audioChunksRef.current = [];
+        // Don't clear chunks here - let them accumulate
         isProcessingRef.current = false;
         return;
       }
@@ -95,15 +95,17 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       // Skip very small audio files
       if (audioBlob.size < 1000) {
         console.log(`Audio too small (${audioBlob.size} bytes), skipping`);
-        audioChunksRef.current = [];
+        // Don't clear chunks here - let them accumulate
         isProcessingRef.current = false;
         return;
       }
       
       console.log(`Processing audio: ${audioBlob.size} bytes, ${validChunks.length} chunks`);
       
-      // Clear chunks for next recording
-      audioChunksRef.current = [];
+      // CRITICAL FIX: Only clear chunks AFTER we create the blob but BEFORE processing
+      // This ensures the MediaRecorder can continue adding new chunks while we process
+      const chunksToProcess = [...audioChunksRef.current];
+      audioChunksRef.current = []; // Clear for new chunks
       
       // Send the audio blob to the backend for STT
       const fileName = `recording_${Date.now()}.webm`;
@@ -136,7 +138,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
           opts.onTranscription(transcript);
         }
       } else if (data.message === "No speech detected") {
-        console.log('No speech detected, continuing to listen');
+        console.log('No speech detected in this segment, continuing to listen');
       } else if (data.error) {
         console.warn('STT processing error:', data.error);
       }
@@ -145,6 +147,11 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       console.error('Error processing audio:', error);
     } finally {
       isProcessingRef.current = false;
+      // Reset speech detection flags to prepare for next utterance
+      hadSpeechRef.current = false;
+      silentFrameCountRef.current = 0;
+      
+      console.log(`Audio processing complete. Continuing to listen for more speech...`);
     }
   };
 
@@ -178,8 +185,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
           audioChunksRef.current.length > 0) {
         console.log(`Detected silence after speech, processing audio...`);
         processAudioChunks();
-        silentFrameCountRef.current = 0;
-        hadSpeechRef.current = false;
+        // Note: processAudioChunks will reset these flags
       }
     } else {
       // Reset silence counter and mark that we detected speech
@@ -239,7 +245,7 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       
       const options = { 
         mimeType,
-        audioBitsPerSecond: 128000 // Reasonable quality
+        audioBitsPerSecond: 128000
       };
       
       console.log('Creating MediaRecorder with options:', options);
@@ -260,14 +266,14 @@ export const useSpeechToText = (options: SttOptions = {}) => {
         stopListening();
       };
       
-      // Start recording in larger chunks for better processing
+      // Start recording in chunks
       mediaRecorder.start(1000); // 1 second chunks
       
       // Start silence detection
       silenceDetectionRef.current = setInterval(detectSilence, 100);
       
       setIsListening(true);
-      updateStatus('Listening... Speak clearly and I\'ll transcribe your words');
+      updateStatus('Listening continuously... Speak and I\'ll transcribe your words');
       
       // Clear status after a few seconds
       setTimeout(() => {
