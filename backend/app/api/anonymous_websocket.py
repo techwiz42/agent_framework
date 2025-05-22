@@ -11,6 +11,7 @@ import re
 import time
 from pydantic import BaseModel, Field, validator
 import ipaddress
+from threading import Lock
 
 from app.core.config import settings
 from app.services.agents.agent_manager import agent_manager
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Only allow these specific agents for anonymous access
-ALLOWED_ANONYMOUS_AGENTS = ["CUSTOMERSERVICE"]
+ALLOWED_ANONYMOUS_AGENTS = ["CUSTOMERSERVICE", "CHATBOT"]
 
 # Security configuration
 MAX_ANONYMOUS_CONNECTIONS = 200  # Maximum concurrent anonymous connections
@@ -28,6 +29,7 @@ MAX_MESSAGE_LENGTH = 1000        # Maximum message length in characters
 MAX_MESSAGES_PER_MINUTE = 20     # Rate limit for messages per minute
 CONNECTION_TIMEOUT = 60          # Timeout for connections in seconds
 IP_COOLDOWN_PERIOD = 60          # Cooldown period for IPs that hit rate limits (seconds)
+MAX_CONVERSATION_LENGTH = 100    # Maximum number of messages to keep in conversation history
 
 # Store anonymous connections in memory (no persistence)
 anonymous_connections: Dict[str, WebSocket] = {}
@@ -40,10 +42,21 @@ ip_cooldowns: Dict[str, float] = {}             # IP -> Cooldown expiry timestam
 # Track total active connections
 active_connection_count = 0
 
+# Store conversation histories in memory (session_id -> conversation history)
+conversation_histories: Dict[str, List[Dict]] = {}
+conversation_histories_lock = Lock()  # Thread safety for conversation histories
+
+# Pydantic model for conversation history entry
+class ConversationEntry(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., min_length=1)
+    timestamp: str
+
 # Pydantic model for validating chat messages
 class ChatMessage(BaseModel):
     type: str = Field(..., pattern="^message$")  # Only allow "message" type
     content: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
+    conversation_history: Optional[List[ConversationEntry]] = []
     timestamp: Optional[datetime] = None
 
     @validator('content')
@@ -112,6 +125,46 @@ def check_message_rate_limit(ip: str) -> bool:
     
     ip_message_counts[ip].append(time.time())
     return False
+
+# Get or create conversation history for a session
+def get_conversation_history(session_id: str) -> List[Dict]:
+    with conversation_histories_lock:
+        if session_id not in conversation_histories:
+            conversation_histories[session_id] = []
+        return conversation_histories[session_id].copy()
+
+# Update conversation history for a session
+def update_conversation_history(session_id: str, history: List[Dict]):
+    with conversation_histories_lock:
+        # Limit conversation length to prevent memory issues
+        if len(history) > MAX_CONVERSATION_LENGTH:
+            # Keep only the most recent messages
+            history = history[-MAX_CONVERSATION_LENGTH:]
+        conversation_histories[session_id] = history
+
+# Clean up conversation history for a session
+def cleanup_conversation_history(session_id: str):
+    with conversation_histories_lock:
+        if session_id in conversation_histories:
+            del conversation_histories[session_id]
+
+# Format conversation history for agent context
+def format_conversation_for_agent(history: List[Dict]) -> str:
+    """Format conversation history as a string for agent context."""
+    if not history:
+        return ""
+    
+    formatted_messages = []
+    for entry in history:
+        role = entry.get('role', 'user')
+        content = entry.get('content', '')
+        # Format as "Role: Content"
+        if role == 'user':
+            formatted_messages.append(f"User: {content}")
+        else:
+            formatted_messages.append(f"Assistant: {content}")
+    
+    return "\n\n".join(formatted_messages)
 
 async def send_token(websocket: WebSocket, token: str):
     """Send a streaming token to the client."""
@@ -260,6 +313,30 @@ async def anonymous_websocket_endpoint(
                     content = chat_message.content
                     
                     if message_type == "message":
+                        # Get the current conversation history
+                        conversation_history = get_conversation_history(session_id)
+                        
+                        # If the client sent conversation history, validate and use it
+                        if chat_message.conversation_history:
+                            # Validate and use client-provided history
+                            validated_history = []
+                            for entry in chat_message.conversation_history:
+                                validated_history.append({
+                                    'role': entry.role,
+                                    'content': entry.content,
+                                    'timestamp': entry.timestamp
+                                })
+                            conversation_history = validated_history
+                        
+                        # Format conversation history for agent context
+                        conversation_context = format_conversation_for_agent(conversation_history)
+                        
+                        # Create the full message with context
+                        if conversation_context:
+                            full_message = f"Previous conversation:\n{conversation_context}\n\nCurrent message:\nUser: {content}"
+                        else:
+                            full_message = content
+                        
                         # First send a typing indicator
                         await send_typing_indicator(websocket, agent_type, True)
                         
@@ -277,10 +354,9 @@ async def anonymous_websocket_endpoint(
                         streaming_callback.tokens_sent = False
                         
                         try:
-                            # Process with agent_manager
-                            # We're using only the specified agent type
+                            # Process with agent_manager using the full conversation context
                             response_agent, response = await agent_manager.process_conversation(
-                                message=content,
+                                message=full_message,  # Include full conversation context
                                 conversation_agents=[agent_type],
                                 agents_config={agent_type: "Anonymous session"},
                                 mention=agent_type,  # Force this specific agent
@@ -290,6 +366,24 @@ async def anonymous_websocket_endpoint(
                             
                             # Clear typing indicator
                             await send_typing_indicator(websocket, agent_type, False)
+                            
+                            # Update conversation history with new messages
+                            # Add user message
+                            conversation_history.append({
+                                'role': 'user',
+                                'content': content,
+                                'timestamp': datetime.utcnow().isoformat()
+                            })
+                            
+                            # Add assistant response
+                            conversation_history.append({
+                                'role': 'assistant',
+                                'content': response,
+                                'timestamp': datetime.utcnow().isoformat()
+                            })
+                            
+                            # Save updated history
+                            update_conversation_history(session_id, conversation_history)
                             
                             # If we're using streaming tokens, we don't need to send the full response again
                             # Only send the full response if we didn't stream tokens
@@ -365,6 +459,10 @@ async def anonymous_websocket_endpoint(
                 if not ip_connections[client_ip]:
                     # No more connections from this IP, remove the entry
                     ip_connections.pop(client_ip, None)
+        
+        # Clean up conversation history for this session
+        # Optional: You might want to keep it for a while in case of reconnection
+        # cleanup_conversation_history(session_id)
         
         # Close the WebSocket if it's still open
         try:

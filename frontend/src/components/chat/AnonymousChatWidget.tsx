@@ -44,9 +44,9 @@ export const AnonymousChatWidget: React.FC = () => {
   const [sttEnabled, setSttEnabled] = useState(true); // Enable STT by default
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   
-  // Using CUSTOMERSERVICE agent
-  const agentType = 'CUSTOMERSERVICE';
-  const agentDisplayName = 'Customer Support';
+  // Using CHATBOT agent
+  const agentType = 'CHATBOT';
+  const agentDisplayName = 'Friendly Disembodied Robot';
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
