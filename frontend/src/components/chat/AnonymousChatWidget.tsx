@@ -42,6 +42,7 @@ export const AnonymousChatWidget: React.FC = () => {
   const [isConnected, setIsConnected] = useState(true);
   const [sessionId] = useState(uuidv4());
   const [sttEnabled, setSttEnabled] = useState(true); // Enable STT by default
+  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   
   // Using CUSTOMERSERVICE agent
   const agentType = 'CUSTOMERSERVICE';
@@ -58,13 +59,18 @@ export const AnonymousChatWidget: React.FC = () => {
     silenceThreshold: 15, // Increased for better noise handling
     silentFramesToProcess: 8, // More conservative processing
     onTranscription: (text) => {
-      console.log('STT transcription received:', text);
-      setInputValue(prev => {
-        // Ensure proper spacing between existing text and new transcription
-        if (!prev) return text;
-        const needsSpace = !prev.endsWith(' ') && !text.startsWith(' ');
-        return prev + (needsSpace ? ' ' : '') + text;
-      });
+      // Only accept transcriptions when not waiting for a response
+      if (!isWaitingForResponse) {
+        console.log('STT transcription received:', text);
+        setInputValue(prev => {
+          // Ensure proper spacing between existing text and new transcription
+          if (!prev) return text;
+          const needsSpace = !prev.endsWith(' ') && !text.startsWith(' ');
+          return prev + (needsSpace ? ' ' : '') + text;
+        });
+      } else {
+        console.log('Ignoring transcription while waiting for response:', text);
+      }
     },
     onAudioLevelChange: (level) => {
       // Audio level change handled in the component via stt.audioLevel
@@ -93,7 +99,7 @@ export const AnonymousChatWidget: React.FC = () => {
 
   // Auto-start STT when chat opens if enabled
   useEffect(() => {
-    if (isOpen && sttEnabled && !stt.isListening) {
+    if (isOpen && sttEnabled && !stt.isListening && !isWaitingForResponse) {
       console.log('Auto-starting STT since chat is open and STT is enabled');
       setTimeout(() => {
         stt.startListening();
@@ -101,12 +107,26 @@ export const AnonymousChatWidget: React.FC = () => {
     }
   }, [isOpen, sttEnabled]);
 
+  // Handle STT based on waiting state
+  useEffect(() => {
+    if (isWaitingForResponse && stt.isListening) {
+      console.log('Pausing STT while waiting for response');
+      stt.stopListening();
+    } else if (!isWaitingForResponse && sttEnabled && isOpen && !stt.isListening) {
+      console.log('Resuming STT after response received');
+      // Add a small delay to ensure smooth transition
+      setTimeout(() => {
+        stt.startListening();
+      }, 500);
+    }
+  }, [isWaitingForResponse, sttEnabled, isOpen]);
+
   // Handle STT toggle
   const handleSttToggle = () => {
     const newEnabled = !sttEnabled;
     setSttEnabled(newEnabled);
     
-    if (newEnabled && isOpen) {
+    if (newEnabled && isOpen && !isWaitingForResponse) {
       // Start listening when enabled
       stt.startListening();
     } else if (stt.isListening) {
@@ -216,6 +236,7 @@ export const AnonymousChatWidget: React.FC = () => {
             
             setMessages(prev => [...prev, newMessage]);
             setIsTyping(false);
+            setIsWaitingForResponse(false);
             
             // Speak the full message (not streamed)
             if (tts.isEnabled) {
@@ -282,6 +303,9 @@ export const AnonymousChatWidget: React.FC = () => {
             if (!data.is_typing && messageBeingBuiltRef.current) {
               messageBeingBuiltRef.current = false;
               console.log("Agent finished typing message:", fullMessageRef.current.substring(0, 50) + (fullMessageRef.current.length > 50 ? '...' : ''));
+              
+              // Clear waiting state when agent finishes
+              setIsWaitingForResponse(false);
               
               // Finish speech processing
               if (tts.isEnabled) {
@@ -376,9 +400,19 @@ export const AnonymousChatWidget: React.FC = () => {
 
   // Handle sending a message
   const handleSendMessage = () => {
-    if (!inputValue.trim()) return;
+    if (!inputValue.trim() || isWaitingForResponse) return;
     
     console.log('Attempting to send message:', inputValue);
+    
+    // CRITICAL: Reset STT state immediately to prevent processing old audio
+    console.log('Resetting STT state before sending message');
+    stt.resetStt();
+    
+    // Stop STT temporarily while sending
+    if (stt.isListening) {
+      console.log('Stopping STT while sending message');
+      stt.stopListening();
+    }
     
     const newMessage = {
       id: uuidv4(),
@@ -388,6 +422,9 @@ export const AnonymousChatWidget: React.FC = () => {
     };
     
     setMessages(prev => [...prev, newMessage]);
+    
+    // Set waiting state
+    setIsWaitingForResponse(true);
     
     // Reset state for new conversation
     fullMessageRef.current = '';
@@ -407,13 +444,31 @@ export const AnonymousChatWidget: React.FC = () => {
         // Only send if the connection is open
         if (wsRef.current.readyState === WebSocket.OPEN) {
           console.log('Sending message through WebSocket');
+          
+          // Create conversation history for context
+          const conversationHistory = messages.map(msg => ({
+            role: msg.sender === 'user' ? 'user' : 'assistant',
+            content: msg.content,
+            timestamp: msg.timestamp.toISOString()
+          }));
+          
+          // Add the current message to history
+          conversationHistory.push({
+            role: 'user',
+            content: inputValue,
+            timestamp: new Date().toISOString()
+          });
+          
+          // Send message with full conversation context
           wsRef.current.send(JSON.stringify({
             type: 'message',
             content: inputValue,
+            conversation_history: conversationHistory,
             timestamp: new Date().toISOString()
           }));
         } else {
           console.warn('WebSocket not in OPEN state, cannot send message');
+          setIsWaitingForResponse(false);
           
           // Try to reconnect if not in OPEN state
           if (wsRef.current.readyState !== WebSocket.CONNECTING) {
@@ -434,6 +489,8 @@ export const AnonymousChatWidget: React.FC = () => {
         }
       } catch (error) {
         console.error('Failed to send message:', error);
+        setIsWaitingForResponse(false);
+        
         // Add a system message about connection issues
         setTimeout(() => {
           setMessages(prev => [...prev, {
@@ -448,6 +505,7 @@ export const AnonymousChatWidget: React.FC = () => {
     } else {
       // If not connected, add a message indicating the connection issue
       console.error('WebSocket not connected (null reference)');
+      setIsWaitingForResponse(false);
       
       setTimeout(() => {
         setMessages(prev => [...prev, {
@@ -559,6 +617,9 @@ export const AnonymousChatWidget: React.FC = () => {
                   Listening
                 </span>
               )}
+              {isWaitingForResponse && (
+                <span className="text-yellow-200">Waiting for response...</span>
+              )}
             </div>
           </div>
         </div>
@@ -572,6 +633,7 @@ export const AnonymousChatWidget: React.FC = () => {
             className={`h-8 w-8 text-white hover:bg-blue-700 rounded-full ${sttEnabled && stt.isListening ? 'bg-red-500 hover:bg-red-600' : ''}`}
             onClick={handleSttToggle}
             aria-label={sttEnabled ? (stt.isListening ? "Disable voice input" : "Enable voice input") : "Enable voice input"}
+            disabled={isWaitingForResponse}
           >
             {sttEnabled && stt.isListening ? 
               <Mic size={16} className="text-white animate-pulse" /> : 
@@ -678,11 +740,17 @@ export const AnonymousChatWidget: React.FC = () => {
         <div className="flex gap-2 items-center">
           <Input
             className="flex-1"
-            placeholder={sttEnabled && stt.isListening ? "Speak and I'll transcribe continuously..." : "Type your message or enable voice input..."}
+            placeholder={
+              isWaitingForResponse 
+                ? "Waiting for response..." 
+                : sttEnabled && stt.isListening 
+                  ? "Speak and I'll transcribe continuously..." 
+                  : "Type your message or enable voice input..."
+            }
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={!isConnected}
+            disabled={!isConnected || isWaitingForResponse}
           />
           
           {/* Voice input status indicator */}
@@ -704,7 +772,7 @@ export const AnonymousChatWidget: React.FC = () => {
             onClick={handleSendMessage}
             className="bg-blue-600 hover:bg-blue-700 text-white"
             aria-label="Send message"
-            disabled={!inputValue.trim() || !isConnected}
+            disabled={!inputValue.trim() || !isConnected || isWaitingForResponse}
           >
             <Send size={18} />
           </Button>
