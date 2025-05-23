@@ -377,7 +377,6 @@ export const useSpeechToText = (options: SttOptions = {}) => {
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
-          console.log(`Audio chunk received: ${event.data.size} bytes, total chunks: ${audioChunksRef.current.length}`);
           
           // Safety check: if we have too many chunks (roughly 20 seconds worth), force processing
           if (audioChunksRef.current.length > 40 && !isProcessingRef.current) {
