@@ -52,6 +52,17 @@ export const AnonymousChatWidget: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const messageBeingBuiltRef = useRef<boolean>(false);
   const fullMessageRef = useRef<string>('');  // Track the full message as it's built
+  const inputRef = useRef<HTMLInputElement>(null); // Add input ref for focus management
+  
+  // Helper function to focus the input
+  const focusInput = () => {
+    // Small delay to ensure UI updates are complete
+    setTimeout(() => {
+      if (inputRef.current && isOpen && !isMinimized) {
+        inputRef.current.focus();
+      }
+    }, 100);
+  };
   
   // Initialize speech to text service with callbacks
   const stt = useSpeechToText({
@@ -91,6 +102,8 @@ export const AnonymousChatWidget: React.FC = () => {
     },
     onPlaybackEnd: () => {
       console.log("TTS playback ended");
+      // Focus input after TTS finishes
+      focusInput();
     },
     onPlaybackError: (error) => {
       console.error("TTS playback error:", error);
@@ -243,6 +256,9 @@ export const AnonymousChatWidget: React.FC = () => {
               console.log("Playing complete message via TTS");
               tts.playAudio(messageContent);
             }
+            
+            // Focus input after message is displayed
+            focusInput();
           } else if (data.type === 'token') {
             // Handle streaming tokens
             const token = data.token || '';
@@ -312,6 +328,9 @@ export const AnonymousChatWidget: React.FC = () => {
                 console.log("Finishing TTS speech for complete message");
                 tts.finishSpeech();
               }
+              
+              // Focus input after agent finishes typing
+              focusInput();
             }
           }
         } catch (error) {
@@ -739,6 +758,7 @@ export const AnonymousChatWidget: React.FC = () => {
         
         <div className="flex gap-2 items-center">
           <Input
+            ref={inputRef}
             className="flex-1"
             placeholder={
               isWaitingForResponse 
