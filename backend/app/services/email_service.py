@@ -59,8 +59,8 @@ class SendGridEmailService:
             self.client = SendGridAPIClient(api_key=self.api_key)
         
         self.template_service = EmailTemplateService()
-        self.from_email = 'pete@cyberiad.ai'  # Verified SendGrid sender
-        self.from_name = 'Thanotopolis CRM'
+        self.from_email = settings.SMTP_FROM_EMAIL  # Verified SendGrid sender
+        self.from_name = f'{settings.FRAMEWORK_DISPLAY_NAME} CRM'
     
     def is_configured(self) -> bool:
         """Check if SendGrid is properly configured"""
@@ -272,8 +272,8 @@ class SendGridEmailService:
         to_email: str,
         user_name: str,
         reset_token: str,
-        organization_name: str = "Thanotopolis",
-        frontend_url: str = "https://dev.thanotopolis.com"
+        organization_name: str = settings.FRAMEWORK_DISPLAY_NAME,
+        frontend_url: str = settings.FRONTEND_URL or f"https://{settings.FRAMEWORK_DOMAIN}"
     ) -> Dict[str, Any]:
         """Send password reset email using the password_reset template"""
         

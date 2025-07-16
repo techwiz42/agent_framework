@@ -1,5 +1,5 @@
 {
-  "name": "thanotopolis-frontend",
+  "name": "agent-framework-frontend",
   "version": "0.1.0",
   "private": true,
   "dependencies": {
@@ -75,13 +75,13 @@
   "main": "jest.config.js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/techwiz42/thanotopolis.git"
+    "url": "git+https://github.com/techwiz42/agent_framework.git"
   },
   "author": "PSisk",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/techwiz42/thanotopolis/issues"
+    "url": "https://github.com/techwiz42/agent_framework/issues"
   },
-  "homepage": "https://github.com/techwiz42/thanotopolis#readme",
+  "homepage": "https://github.com/techwiz42/agent_framework#readme",
   "description": ""
 }

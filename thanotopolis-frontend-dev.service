@@ -1,12 +1,12 @@
 [Unit]
-Description=Thanotopolis Frontend Development Server
+Description=${FRAMEWORK_DISPLAY_NAME} Frontend Development Server
 After=network.target
 
 [Service]
 Type=exec
 User=peter
 Group=peter
-WorkingDirectory=/home/peter/thanotopolis_dev/frontend
+WorkingDirectory=/home/peter/agent_framework/frontend
 Environment=NODE_ENV=production
 Environment=PORT=3001
 ExecStart=/usr/bin/npm start

@@ -13,7 +13,7 @@ export default function TermsOfService() {
           <section className="mb-8">
             <h2 className="text-2xl font-semibold mb-4">Agreement to Terms</h2>
             <p className="mb-4">
-              By accessing and using Thanotopolis, you accept and agree to be bound by the terms and 
+              By accessing and using this service, you accept and agree to be bound by the terms and 
               provision of this agreement. If you do not agree to abide by the above, please do not 
               use this service.
             </p>
@@ -22,7 +22,7 @@ export default function TermsOfService() {
           <section className="mb-8">
             <h2 className="text-2xl font-semibold mb-4">Description of Service</h2>
             <p className="mb-4">
-              Thanotopolis is an AI-powered conversation platform that enables users to engage in 
+              This is an AI-powered conversation platform that enables users to engage in 
               interactive dialogues with artificial intelligence systems. Our service includes 
               text-based conversations, voice input/output capabilities, and conversation management features.
             </p>
@@ -75,7 +75,7 @@ export default function TermsOfService() {
 
             <h3 className="text-xl font-medium mb-3">Our Intellectual Property</h3>
             <ul className="list-disc pl-6 mb-4">
-              <li>The Thanotopolis platform, software, and branding are our intellectual property</li>
+              <li>The platform, software, and branding are our intellectual property</li>
               <li>You may not copy, modify, or distribute our proprietary technology</li>
               <li>All rights not expressly granted to you are reserved by us</li>
             </ul>
@@ -191,8 +191,8 @@ export default function TermsOfService() {
               If you have any questions about these Terms of Service, please contact us at:
             </p>
             <p className="mb-4">
-              <a href="mailto:pete@cyberiad.ai" className="text-blue-600 hover:text-blue-800 underline">
-                pete@cyberiad.ai
+              <a href="mailto:admin@example.com" className="text-blue-600 hover:text-blue-800 underline">
+                admin@example.com
               </a>
             </p>
           </section>

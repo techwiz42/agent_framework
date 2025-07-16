@@ -56,7 +56,7 @@ class StripeService:
             name=name,
             metadata={
                 'tenant_id': str(tenant_id),
-                'platform': 'thanotopolis'
+                'platform': settings.FRAMEWORK_NAME.lower().replace(' ', '_')
             }
         )
         

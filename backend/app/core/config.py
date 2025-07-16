@@ -8,8 +8,9 @@ from pydantic import ConfigDict
 from dotenv import load_dotenv
 
 # Determine env file path
-# DEV environment now lives on the swarmchat Digital Ocean droplet
-env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
+# Framework configuration path
+framework_name = os.getenv('FRAMEWORK_NAME', 'agent_framework').lower().replace(' ', '_')
+env_path = f'/etc/{framework_name}/.env' if os.getenv('ENV') == 'production' else os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
 load_dotenv(env_path)
 
 # Set up logger
@@ -18,9 +19,15 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     model_config = ConfigDict(extra='ignore', env_file=env_path)
     
+    # Framework Settings
+    FRAMEWORK_NAME: str = os.getenv("FRAMEWORK_NAME", "Agent Framework")
+    FRAMEWORK_DOMAIN: str = os.getenv("FRAMEWORK_DOMAIN", "example.com")
+    FRAMEWORK_EMAIL: str = os.getenv("FRAMEWORK_EMAIL", "admin@example.com")
+    FRAMEWORK_DISPLAY_NAME: str = os.getenv("FRAMEWORK_DISPLAY_NAME", "Agent Framework")
+    
     # API Settings
     API_VERSION: str = "1.0"
-    PROJECT_NAME: str = "Cyberiad"
+    PROJECT_NAME: str = FRAMEWORK_NAME
     
     MAX_CONTEXT_MESSAGES: int = 25
 
@@ -65,7 +72,7 @@ class Settings(BaseSettings):
     API_URL: Optional[str] = os.getenv("API_URL")  # Add this for external URL
 
     # Testing
-    TEST_DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/test_thanotopolis"
+    TEST_DATABASE_URL: str = f"postgresql+asyncpg://postgres:postgres@localhost:5432/test_{framework_name}"
     DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")
 
     # Parse CORS origins from env or use default
@@ -79,7 +86,6 @@ class Settings(BaseSettings):
 
     # RAG settings
     BUFFER_SAVE_DIR: Optional[str] = os.getenv("BUFFER_SAVE_DIR")
-    CHROMA_PERSIST_DIR: Optional[str] = os.getenv("CHROMA_PERSIST_DIR")
     RAG_CHUNK_SIZE: Optional[str] = os.getenv("RAG_CHUNK_SIZE")
     RAG_CHUNK_OVERLAP: Optional[str] = os.getenv("RAG_CHUNK_OVERLAP")
 
@@ -137,8 +143,8 @@ class Settings(BaseSettings):
     AGENT_RESPONSE_TIMEOUT: int = 120  # seconds
     MAX_TURNS: int = 50
 
-    SMTP_FROM_EMAIL: str = "pete@cyberiad.ai"
-    SMTP_FROM_NAME: str = "Cyberiad.ai"
+    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", FRAMEWORK_EMAIL)
+    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", FRAMEWORK_DISPLAY_NAME)
     
     # SendGrid Email Configuration
     SENDGRID_API_KEY: str = os.getenv("SENDGRID_API_KEY", "")
